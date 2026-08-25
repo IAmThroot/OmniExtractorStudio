@@ -28,7 +28,7 @@ jobs:
 
       - name: Build Executable
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" tfe_upgraded.py
+          pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" extractor.py
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v3

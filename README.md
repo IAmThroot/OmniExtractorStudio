@@ -22,48 +22,61 @@ OmniExtract Studio is an all-in-one desktop application designed for high-precis
 pip install -r requirements.txt
 ```
 
-## Running the Application
+## Usage & Installation
 
-To run from source:
+You can run OmniExtract Studio via a pre-built executable for your OS, or by building and running from the source code.
 
-```bash
-python3 tfe_upgraded.py
-```
+### Option 1: Pre-built Executables (Recommended)
 
-## Building Executables
+1. Navigate to the **[Releases](../../releases)** page on GitHub.
+2. **For Windows**: Download the `.exe` file. Double-click to run (no installation required).
+3. **For Linux**: Download the `.AppImage` file. Make it executable and run it:
+   ```bash
+   chmod +x OmniExtract-x86_64.AppImage
+   ./OmniExtract-x86_64.AppImage
+   ```
 
-### Windows (.exe)
+### Option 2: Run from Source
 
-OmniExtract Studio utilizes GitHub Actions to automatically cross-compile a standalone `.exe` using PyInstaller. You can download the latest `.exe` from the [Releases](#) page.
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+   cd "YOUR_REPO"
+   ```
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Run the application:
+   ```bash
+   python3 extractor.py
+   ```
 
-To build manually on Windows:
+### Option 3: Build Executables Manually
+
+To compile the application yourself:
+
+**Windows (.exe)**
 ```cmd
 pip install -r requirements.txt pyinstaller
-pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" tfe_upgraded.py
+pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" extractor.py
 ```
 
-### Linux (.AppImage)
-
-To package as an AppImage on Linux:
+**Linux (.AppImage)**
+We have provided a helper script to automate AppImage generation.
 ```bash
-# Install PyInstaller
-pip install pyinstaller
+# Install dependencies
+pip install -r requirements.txt pyinstaller
 
-# Build the binary
-pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" tfe_upgraded.py
+# Build the PyInstaller binary
+pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" extractor.py
 
-# Download appimagetool
-wget -O appimagetool "https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage"
+# Download appimagetool (Continuous Release)
+wget -O appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
 chmod +x appimagetool
 
-# Create AppDir structure and bundle
-mkdir -p AppDir/usr/bin
-cp -r dist/OmniExtract/* AppDir/usr/bin/
-cp AppRun AppDir/
-cp OmniExtract.desktop AppDir/
-cp icon.png AppDir/
-
-./appimagetool AppDir OmniExtract-x86_64.AppImage
+# Run the build script
+./build_appimage.sh
 ```
 
 ## License
