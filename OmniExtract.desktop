@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=OmniExtract Studio
+Comment=All-in-one desktop application for high-precision video processing
+Exec=OmniExtract
+Icon=OmniExtract
+Categories=AudioVideo;Video;
