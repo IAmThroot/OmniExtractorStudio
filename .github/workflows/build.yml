@@ -1,12 +1,17 @@
-name: Build OmniExtract Studio
+name: Build & Release OmniExtract Studio
 
 on:
   push:
     branches:
       - main
       - master
+    tags:
+      - 'v*'
   release:
-    types: [created]
+    types: [published, created]
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -30,8 +35,61 @@ jobs:
         run: |
           pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" extractor.py
 
-      - name: Upload Artifact
+      - name: Compress Windows Build
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/OmniExtract/* -DestinationPath OmniExtract-Windows.zip
+
+      - name: Upload Artifact (Actions Tab)
         uses: actions/upload-artifact@v4
         with:
           name: OmniExtract-Windows
           path: dist/OmniExtract
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: OmniExtract-Windows.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libgl1-mesa-glx libegl1-mesa libpulse0
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build PyInstaller Binary
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" extractor.py
+
+      - name: Download appimagetool & Build AppImage
+        run: |
+          wget -q -O appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+          chmod +x build_appimage.sh AppRun
+          sed -i 's/\.\/appimagetool/\.\/appimagetool --appimage-extract-and-run/g' build_appimage.sh
+          ./build_appimage.sh
+
+      - name: Upload Artifact (Actions Tab)
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniExtract-Linux-AppImage
+          path: OmniExtract-x86_64.AppImage
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: OmniExtract-x86_64.AppImage
