@@ -1,4 +1,5 @@
 #!/bin/bash
+rm -rf AppDir
 mkdir -p AppDir/usr/bin
 cp -r dist/OmniExtract/* AppDir/usr/bin/
 cp AppRun AppDir/
