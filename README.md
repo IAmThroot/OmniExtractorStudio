@@ -17,7 +17,7 @@
 
   <br><br>
   
-  ![App Screenshot](assets/screenshots/main_interface.png)
+  <img src="assets/screenshots/main_interface.png" alt="App Screenshot" width="100%">
 </div>
 
 ---
