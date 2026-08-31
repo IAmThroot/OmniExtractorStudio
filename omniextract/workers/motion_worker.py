@@ -37,17 +37,13 @@ class MotionExtractionWorker(QThread):
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         is_yolo = "YOLO" in self.engine
-        ort_session = None
-        input_name = None
-        target_classes = [0, 1, 2, 3, 5, 6, 7, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
         
         fgbg = None
+        yolo_detector = None
         if is_yolo:
-            import onnxruntime
-            import numpy as np
+            from ..ai.detector import YOLOPresenceDetector
             model_path = get_resource_path("assets/models/yolov8n.onnx")
-            ort_session = onnxruntime.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-            input_name = ort_session.get_inputs()[0].name
+            yolo_detector = YOLOPresenceDetector(model_path)
         else:
             var_threshold = max(5, 200 - int(self.sensitivity * 1.95))
             fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=var_threshold, detectShadows=False)
@@ -76,42 +72,8 @@ class MotionExtractionWorker(QThread):
             motion_detected = False
             
             if is_yolo:
-                # --- YOLOv8 ONNX Logic ---
-                # 1. Letterbox resize to 640x640 (standard YOLOv8 input)
-                shape = frame.shape[:2]
-                r = min(640 / shape[0], 640 / shape[1])
-                new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
-                dw, dh = (640 - new_unpad[0]) / 2, (640 - new_unpad[1]) / 2
-                
-                if shape[::-1] != new_unpad:
-                    im = cv2.resize(frame, new_unpad, interpolation=cv2.INTER_LINEAR)
-                else:
-                    im = frame.copy()
-                    
-                top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-                left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-                im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
-                
-                # 2. Preprocess: BGR -> RGB, HWC -> CHW, 0-255 -> 0.0-1.0
-                im = im[:, :, ::-1].transpose(2, 0, 1)
-                im = np.ascontiguousarray(im).astype(np.float32) / 255.0
-                im = im[None]  # Add batch dimension
-                
-                # 3. ONNX Inference
-                results = ort_session.run(None, {input_name: im})[0]
-                
-                # 4. Ultra-Fast Presence Detection (Bypassing Bounding Box Decoding & NMS)
-                # The YOLOv8 raw ONNX output shape is (1, 84, 8400) where:
-                # - rows 0-3 are bounding box coordinates
-                # - rows 4-83 are the 80 COCO class confidence scores
-                # For motion/presence gating, we do not require full object localization or NMS.
-                # We slice the scores for our target classes (people, vehicles, animals) and check
-                # if the peak presence confidence among all anchors exceeds the trigger threshold.
-                scores = results[0, 4:84, :]
-                target_scores = scores[target_classes, :]
-                
-                if np.max(target_scores) > self.yolo_conf:
-                    motion_detected = True
+                # Delegate to extracted YOLO presence detector
+                motion_detected = yolo_detector.detect_presence(frame, self.yolo_conf)
             else:
                 # MOG2 Logic
                 small = cv2.resize(frame, (320, 180))
