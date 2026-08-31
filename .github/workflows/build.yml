@@ -32,7 +32,7 @@ jobs:
           pip install pyinstaller pytest
 
       - name: Run Tests
-        run: pytest tests/
+        run: python -m pytest tests/
 
       - name: Build Executable
         run: |
@@ -77,7 +77,7 @@ jobs:
           pip install pyinstaller pytest
 
       - name: Run Tests
-        run: pytest tests/
+        run: python -m pytest tests/
 
       - name: Build PyInstaller Binary
         run: |
