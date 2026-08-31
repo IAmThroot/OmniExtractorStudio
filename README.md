@@ -28,9 +28,9 @@
 
 ### Option 1: Pre-built Binaries (No Python Setup Needed)
 1. Head over to the **[Releases](https://github.com/IAmThroot/OmniExtractorStudio/releases)** page.
-2. **Windows (`.exe`)**:
-   - Download the standalone `OmniExtract.exe` executable.
-   - Run the executable directly.
+2. **Windows (Portable `.zip`)**:
+   - Download and extract `OmniExtract-Windows.zip`.
+   - Run `OmniExtract.exe` from the extracted folder.
    - *Requirement*: Ensure FFmpeg is installed and accessible in your Windows system PATH (see below).
 3. **Linux (`.AppImage`)**:
    - Download `OmniExtract-x86_64.AppImage`.
