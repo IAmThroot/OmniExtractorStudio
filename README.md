@@ -189,8 +189,30 @@ Generate optimized animations:
 ### Screenshots
 
 <div align="center">
-  <img src="assets/screenshots/feature_extraction.png" width="45%" alt="Frame Extraction">
-  <img src="assets/screenshots/feature_preview.png" width="45%" alt="Real-Time Preview">
+  <table border="0">
+    <tr>
+      <td align="center" width="50%">
+        <b>Frame Extraction</b><br>
+        <img src="assets/screenshots/feature_extraction.png" width="100%" alt="Frame Extraction">
+      </td>
+      <td align="center" width="50%">
+        <b>Motion Detection (YOLO / MOG2)</b><br>
+        <img src="assets/screenshots/motion_detection.png" width="100%" alt="Motion Detection">
+      </td>
+    </tr>
+    <tr>
+      <td align="center" width="50%">
+        <b>GIF & WebP Creator</b><br>
+        <img src="assets/screenshots/gif_maker.png" width="100%" alt="GIF Maker">
+      </td>
+      <td align="center" width="50%">
+        <b>Interactive Video Preview</b><br>
+        <img src="assets/screenshots/preview_window.png" width="100%" alt="Video Preview">
+      </td>
+    </tr>
+  </table>
+  <br>
+  <img src="assets/screenshots/feature_preview.png" width="90%" alt="Playback Timeline Preview">
 </div>
 
 ---
