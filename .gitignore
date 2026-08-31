@@ -38,3 +38,7 @@ omni_shifted_*.srt
 # AppImage build artifacts
 AppDir/
 *.AppImage
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/

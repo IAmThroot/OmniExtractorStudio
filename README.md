@@ -1,84 +1,233 @@
-# OmniExtract Studio
+<div align="center">
+  <img src="assets/screenshots/hero_icon.png" width="128" height="128" alt="OmniExtract Studio Logo">
+  <h1>OmniExtract Studio v1.1.0</h1>
+  <p><b>An all-in-one desktop application designed for high-precision video processing, frame extraction, intelligent motion tracking, and more.</b></p>
+  
+  [![GitHub Release](https://img.shields.io/github/v/release/IAmThroot/OmniExtractorStudio)](https://github.com/IAmThroot/OmniExtractorStudio/releases)
+  [![License](https://img.shields.io/github/license/IAmThroot/OmniExtractorStudio)](LICENSE)
+  
+  <br>
 
-OmniExtract Studio is an all-in-one desktop application designed for high-precision video processing, frame extraction, intelligent motion tracking, clip editing, and animated GIF/WebP creation. Built on top of PyQt6, OpenCV, and FFmpeg, it offers unparalleled control and performance for creating datasets, ripping subtitles, and building lightweight video animations.
+  <a href="https://github.com/IAmThroot/OmniExtractorStudio/releases/latest">
+    <img src="https://img.shields.io/badge/Download_for_Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" />
+  </a>
+  <a href="https://github.com/IAmThroot/OmniExtractorStudio/releases/latest">
+    <img src="https://img.shields.io/badge/Download_for_Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download for Linux" />
+  </a>
 
-## Features
+  <br><br>
+  
+  ![App Screenshot](assets/screenshots/main_interface.png)
+</div>
 
-- **Advanced Frame Extraction**: Extract frames accurately. Features an intelligent blur/sharpness filter (using Laplacian variance) to automatically discard blurry frames during extraction.
-- **Clip Cutting & Multi-Segment Export**: Non-destructively trim, chapterize, and extract multiple clips using hardware-accelerated `ffmpeg` stream copying, or re-encode them.
-- **Motion-Triggered Extraction**: Automatically isolate and extract only the moments of movement in a video (e.g. security footage, wildlife cams) using OpenCV's MOG2 background subtractor.
-- **Animated GIF & WebP Maker**: Create high-quality, lightweight animations. Features 2-pass FFmpeg palette generation, advanced dithering, and resolution scaling.
-- **Subtitle Ripper & Burner**: Instantly extract embedded subtitle tracks (`.srt`, `.vtt`) or hard-burn them visually into clips and animations.
-- **Real-Time Video Preview**: A smooth, native-framerate playback window with timeline thumbnail generation, sub-frame scrubbing, and anti-aliased floating subtitle overlays.
+---
 
-## Requirements
+---
 
-- Python 3.9+
-- [FFmpeg & FFprobe](https://ffmpeg.org/download.html) (Must be installed and available on system PATH)
+## 📥 Installation Guide
 
-### Python Dependencies
+### Option 1: Pre-built Binaries (No Python Setup Needed)
+1. Head over to the **[Releases](https://github.com/IAmThroot/OmniExtractorStudio/releases)** page.
+2. **Windows (`.exe`)**:
+   - Download the standalone `OmniExtract.exe` executable.
+   - Run the executable directly.
+   - *Requirement*: Ensure FFmpeg is installed and accessible in your Windows system PATH (see below).
+3. **Linux (`.AppImage`)**:
+   - Download `OmniExtract-x86_64.AppImage`.
+   - Make it executable:
+     ```bash
+     chmod +x OmniExtract-x86_64.AppImage
+     ./OmniExtract-x86_64.AppImage
+     ```
 
+### Option 2: Running from Source
+
+#### 1. Prerequisites: FFmpeg Installation
+OmniExtract Studio uses FFmpeg for high-speed multiplexing, stream copying, audio/video encoding, and subtitle ripping.
+
+- **Windows**:
+  - Download a release build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) or install via winget / scoop:
+    ```powershell
+    winget install Gyan.FFmpeg
+    ```
+  - Verify in PowerShell or Command Prompt:
+    ```powershell
+    ffmpeg -version
+    ```
+- **Linux (Ubuntu / Debian / Mint)**:
+  ```bash
+  sudo apt update && sudo apt install ffmpeg
+  ```
+- **Linux (Arch / Manjaro)**:
+  ```bash
+  sudo pacman -S ffmpeg
+  ```
+
+#### 2. Clone Repository & Setup Environment
+```bash
+git clone https://github.com/IAmThroot/OmniExtractorStudio.git
+cd OmniExtractorStudio
+```
+
+*(Recommended)* Create and activate a Python virtual environment:
+- **Linux / macOS**:
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  ```
+- **Windows (PowerShell)**:
+  ```powershell
+  python -m venv .venv
+  .venv\Scripts\Activate.ps1
+  ```
+
+#### 3. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-## Usage & Installation
+#### 4. Launch Application
+- **Linux**:
+  ```bash
+  python3 extractor.py
+  ```
+- **Windows**:
+  ```powershell
+  python extractor.py
+  ```
 
-You can run OmniExtract Studio via a pre-built executable for your OS, or by building and running from the source code.
+---
 
-### Option 1: Pre-built Executables (Recommended)
+## 🚀 Step-by-Step Usage Guide
 
-1. Navigate to the **[Releases](https://github.com/IAmThroot/OmniExtractorStudio/releases)** page on GitHub.
-2. **For Windows**: Download the `.exe` (or zip) file. Double-click to run (no installation required).
-3. **For Linux**: Download the `.AppImage` file. Make it executable and run it:
+### 1. Universal Video Source & Output Panel
+The top control bar is shared across all workspace tabs:
+1. Click **Browse** under **Source Video** (or drag and drop a video file directly onto the input box).
+2. The video metadata (container format, resolution, FPS, duration, audio channels, and subtitle streams) will be automatically detected.
+3. Click **Browse** under **Save Directory** to set where extracted images, clips, or GIFs will be written.
+4. Click **Open Folder** at any time to immediately view your exported files in your system file explorer.
+
+---
+
+### 2. Frame Extraction
+Extract still images with sub-millisecond precision and optional sharpness gating:
+1. **Choose Time Range**: Pick **Full Video** or select **Custom Range** to specify start and end timestamps.
+2. **Extraction Rate**:
+   - *Every Nth Frame*: Extract based on frame cadences (e.g., every 10th frame).
+   - *Interval (Seconds)*: Extract at set time cadences (e.g., 1 frame every 0.5s).
+   - *All Frames*: Extract every single sequential frame.
+   - *Custom Target FPS*: Resample frames to an arbitrary framerate.
+3. **Format & Naming**:
+   - Choose image output format (`.jpg`, `.png`, `.webp`, `.bmp`).
+   - Select timestamp naming templates (e.g., `frame_001_00-01-20.500.jpg`).
+4. **Blur Filtering (Optional)**:
+   - Check **Filter Blurry Frames** and adjust the Laplacian variance threshold (default: `100.0`). Blurry or motion-degraded frames will automatically be skipped.
+5. Click **Start Extraction**.
+
+---
+
+### 3. Clip Cutting & Multi-Segment Trimming
+Extract lossless clips or re-encoded segments:
+- **Single Clip Mode**:
+  - Set the start and end timestamps.
+  - Choose **Lossless Stream Copy** (`-c copy` for instant, non-destructive cutting without quality loss) or **Re-encode** (for frame-accurate cuts with custom video/audio codecs).
+- **Multi-Segment Mode**:
+  - Add multiple segment intervals (e.g., `00:01:00 - 00:01:30`, `00:05:00 - 00:06:00`).
+  - Merge segments into a single reel or export them as individual indexed files.
+
+---
+
+### 4. Motion-Triggered Extraction (MOG2 & YOLOv8 AI)
+Isolate moments containing movement without scanning footage manually:
+1. Select your **Processing Engine**:
+   - **MOG2 (Pixel-Based)**: Ultra-fast background subtraction ideal for static surveillance or wildlife cameras. Tune **Sensitivity** (0–100) and **Min Area (px)** to discard sensor noise.
+   - **YOLOv8 (AI-Based)**: Deep learning object detection running locally on an optimized ONNX Runtime backend (`assets/models/yolov8n.onnx`). Automatically filters for people, vehicles, and animals. Adjust the **Confidence Threshold** (e.g., `0.40`).
+2. Choose **Extraction Mode**:
+   - **Keyframes**: Saves a single crisp image at the start of each motion event.
+   - **Clips**: Exports the full duration of detected motion as an `.mp4`/`.mkv` video.
+3. Adjust **Cooldown Time (ms)**:
+   - Sets the stillness duration required before closing a motion event. Lower cooldowns (e.g., `200ms`–`500ms`) chop footage into distinct micro-events; higher cooldowns (e.g., `2000ms`) keep continuous motion merged into unified clips.
+4. Click **Start Motion Extraction**.
+
+---
+
+### 5. Animated GIF & WebP Maker
+Generate optimized animations:
+1. Select your start time, end time, and target FPS (10–30 FPS recommended).
+2. Choose resolution scaling (e.g., `320px`, `480px`, `720px`, or source).
+3. Toggle 2-pass palette generation for rich color depth and minimal banding.
+4. Export as `.gif` or animated `.webp`.
+
+---
+
+### 6. Subtitles & Real-Time Preview
+- **Video Preview**: Click **Preview Video** to open the interactive playback window. Scrub through the timeline, view live frame timestamps, and toggle subtitle overlays.
+- **Subtitle Ripper**: Extract embedded `.srt` or `.vtt` tracks into external files.
+- **Subtitle Burner**: Hardcode subtitles directly into video frames with custom fonts, margins, and styles.
+
+---
+
+### 7. Presets & Batch Queueing
+- **Profile Presets**: Use the top toolbar to switch between built-in workflows (e.g., *Discord Reaction GIF*, *Security Highlights*, *Archive Master*) or click **Save Preset** to store your own configuration.
+- **Batch Processing**: Switch to the **Batch Queue** tab to process an entire folder of videos sequentially using shared or custom job parameters.
+
+---
+
+## ✨ Feature Overview
+
+- **Advanced Frame Extraction**: Extract frames accurately. Features an intelligent blur/sharpness filter (using Laplacian variance) to automatically discard blurry frames during extraction.
+- **Clip Cutting & Multi-Segment Export**: Non-destructively trim, chapterize, and extract multiple clips using hardware-accelerated `ffmpeg` stream copying, or re-encode them.
+- **Motion-Triggered Extraction**: Automatically isolate and extract only moments of movement (security highlights, wildlife monitoring, action shots). Choose between classical pixel-based **MOG2 background subtraction** or high-accuracy **YOLOv8 AI-based object detection** running on an ultra-lightweight, hardware-optimized ONNX Runtime backend (zero heavy PyTorch/CUDA dependencies required). Export either representative keyframes or full continuous motion video clips.
+- **Animated GIF & WebP Maker**: Create high-quality, lightweight animations. Features 2-pass FFmpeg palette generation, advanced dithering, and resolution scaling.
+- **Subtitle Ripper & Burner**: Instantly extract embedded subtitle tracks (`.srt`, `.vtt`) or hard-burn them visually into clips and animations.
+- **Real-Time Video Preview**: A smooth, native-framerate playback window with timeline thumbnail generation, sub-frame scrubbing, and anti-aliased floating subtitle overlays.
+
+- **Full-App Presets System**: Save and load your configuration across the entire app. Comes with built-in profiles like "Discord Reaction GIF" and "Security Highlights", plus the ability to save custom configurations.
+- **Smart Batch Queueing**: Automate processing across entire folders by generating Bulk Custom Jobs (Frames, Clips, Motion Highlights, GIFs) on the fly.
+- **Custom Job Queueing**: Need granular control? Queue up specific videos with unique, independent settings (trim times, resolution, subtitles) to be processed seamlessly in the background.
+
+### Screenshots
+
+<div align="center">
+  <img src="assets/screenshots/feature_extraction.png" width="45%" alt="Frame Extraction">
+  <img src="assets/screenshots/feature_preview.png" width="45%" alt="Real-Time Preview">
+</div>
+
+---
+
+## 📋 Requirements
+
+- Windows 10/11 or modern Linux distribution (Ubuntu 20.04+)
+- [FFmpeg & FFprobe](https://ffmpeg.org/download.html) (Must be installed and available on system PATH)
+
+If running from source:
+- Python 3.9+
+- PyQt6, OpenCV, NumPy, ONNX Runtime (see `requirements.txt`)
+- Bundled YOLO model located at `assets/models/yolov8n.onnx`
+
+---
+
+## ⚠️ Known Limitations
+
+- Subtitle burning requires re-encoding the video track, which can take time for large files.
+- Motion detection performance is tied to CPU speed and video resolution. Downscaling before motion detection is recommended for 4K footage.
+- Missing native MacOS support (currently relies on running from source).
+
+---
+
+## 🧪 Testing
+
+The project includes a comprehensive test suite utilizing `pytest` to ensure core utilities, metadata parsing, timestamp calculations, and subtitle workflows operate reliably.
+
+To run the test suite:
+1. Ensure you have installed the test dependencies (e.g., `pip install pytest`).
+2. Run `pytest` from the root directory:
    ```bash
-   chmod +x OmniExtract-x86_64.AppImage
-   ./OmniExtract-x86_64.AppImage
+   pytest tests/
    ```
 
-### Option 2: Run from Source
+---
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/IAmThroot/OmniExtractorStudio.git
-   cd OmniExtractorStudio
-   ```
-2. Install Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Run the application:
-   ```bash
-   python3 extractor.py
-   ```
-
-### Option 3: Build Executables Manually
-
-To compile the application yourself:
-
-**Windows (.exe)**
-```cmd
-pip install -r requirements.txt pyinstaller
-pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" --add-data "OmniExtract.png;." extractor.py
-```
-
-**Linux (.AppImage)**
-We have provided a helper script to automate AppImage generation.
-```bash
-# Install dependencies
-pip install -r requirements.txt pyinstaller
-
-# Build the PyInstaller binary
-pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" --add-data "OmniExtract.png:." extractor.py
-
-# Download appimagetool (Continuous Release)
-wget -O appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-chmod +x appimagetool
-
-# Run the build script
-./build_appimage.sh
-```
-
-## License
+## 📄 License
 
 MIT License
