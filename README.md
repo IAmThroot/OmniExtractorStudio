@@ -110,16 +110,14 @@ The top control bar is shared across all workspace tabs:
 ---
 
 ### 2. Frame Extraction
-Extract still images with sub-millisecond precision and optional sharpness gating:
+Frame-accurate extraction with millisecond timestamp control and optional sharpness gating:
 1. **Choose Time Range**: Pick **Full Video** or select **Custom Range** to specify start and end timestamps.
 2. **Extraction Rate**:
-   - *Every Nth Frame*: Extract based on frame cadences (e.g., every 10th frame).
-   - *Interval (Seconds)*: Extract at set time cadences (e.g., 1 frame every 0.5s).
-   - *All Frames*: Extract every single sequential frame.
-   - *Custom Target FPS*: Resample frames to an arbitrary framerate.
+   - *Frame Cadence*: Extract every frame, or every 2nd, 5th, or 10th frame.
+   - *Framerate Resampling*: Extract at fixed rates (1 FPS, 2 FPS, 5 FPS, 10 FPS) or set an arbitrary **Custom FPS**.
 3. **Format & Naming**:
-   - Choose image output format (`.jpg`, `.png`, `.webp`, `.bmp`).
-   - Select timestamp naming templates (e.g., `frame_001_00-01-20.500.jpg`).
+   - Choose image output format (**PNG**, **JPEG**, **TIFF**).
+   - Select timestamp naming templates (e.g., `frame_{timestamp}`).
 4. **Blur Filtering (Optional)**:
    - Check **Filter Blurry Frames** and adjust the Laplacian variance threshold (default: `100.0`). Blurry or motion-degraded frames will automatically be skipped.
 5. Click **Start Extraction**.
@@ -141,7 +139,7 @@ Extract lossless clips or re-encoded segments:
 Isolate moments containing movement without scanning footage manually:
 1. Select your **Processing Engine**:
    - **MOG2 (Pixel-Based)**: Ultra-fast background subtraction ideal for static surveillance or wildlife cameras. Tune **Sensitivity** (0–100) and **Min Area (px)** to discard sensor noise.
-   - **YOLOv8 (AI-Based)**: Deep learning object detection running locally on an optimized ONNX Runtime backend (`assets/models/yolov8n.onnx`). Automatically filters for people, vehicles, and animals. Adjust the **Confidence Threshold** (e.g., `0.40`).
+   - **YOLOv8 (AI Presence Detection)**: Fast neural presence detection running locally on an optimized ONNX Runtime backend (`assets/models/yolov8n.onnx`). Bypasses expensive bounding box decoding and NMS to rapidly scan for the presence of target classes (people, vehicles, animals) above a specified **Confidence Threshold** (e.g., `0.40`).
 2. Choose **Extraction Mode**:
    - **Keyframes**: Saves a single crisp image at the start of each motion event.
    - **Clips**: Exports the full duration of detected motion as an `.mp4`/`.mkv` video.
@@ -177,7 +175,7 @@ Generate optimized animations:
 
 - **Advanced Frame Extraction**: Extract frames accurately. Features an intelligent blur/sharpness filter (using Laplacian variance) to automatically discard blurry frames during extraction.
 - **Clip Cutting & Multi-Segment Export**: Non-destructively trim, chapterize, and extract multiple clips using hardware-accelerated `ffmpeg` stream copying, or re-encode them.
-- **Motion-Triggered Extraction**: Automatically isolate and extract only moments of movement (security highlights, wildlife monitoring, action shots). Choose between classical pixel-based **MOG2 background subtraction** or high-accuracy **YOLOv8 AI-based object detection** running on an ultra-lightweight, hardware-optimized ONNX Runtime backend (zero heavy PyTorch/CUDA dependencies required). Export either representative keyframes or full continuous motion video clips.
+- **Motion-Triggered Extraction**: Automatically isolate and extract only moments of movement (security highlights, wildlife monitoring, action shots). Choose between classical pixel-based **MOG2 background subtraction** or high-speed **YOLOv8 AI presence detection** running on an ultra-lightweight, hardware-optimized ONNX Runtime backend (zero heavy PyTorch/CUDA dependencies required). Export either representative keyframes or full continuous motion video clips.
 - **Animated GIF & WebP Maker**: Create high-quality, lightweight animations. Features 2-pass FFmpeg palette generation, advanced dithering, and resolution scaling.
 - **Subtitle Ripper & Burner**: Instantly extract embedded subtitle tracks (`.srt`, `.vtt`) or hard-burn them visually into clips and animations.
 - **Real-Time Video Preview**: A smooth, native-framerate playback window with timeline thumbnail generation, sub-frame scrubbing, and anti-aliased floating subtitle overlays.

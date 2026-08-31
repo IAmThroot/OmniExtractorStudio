@@ -22,8 +22,8 @@ BUILTIN_PRESETS = {
     },
     "AI Dataset Collector": {
         "target_tab": 0, # Frame Tab
-        "format": "JPG",
-        "extraction_mode": "Custom Interval",
+        "format": "JPEG",
+        "extraction_mode": "Custom FPS",
         "custom_fps": 1.0,
         "quality": 95,
         "filter_blur": True,
@@ -55,9 +55,9 @@ BUILTIN_PRESETS = {
     "Pristine Wallpaper Grabber": {
         "target_tab": 0, # Frame Tab
         "format": "PNG",
-        "extraction_mode": "I-Frames (Keyframes)",
+        "extraction_mode": "Every Frame",
         "custom_fps": 1.0,
-        "quality": 100,
+        "quality": 9,
         "filter_blur": True,
         "extract_part": False,
         "motion_mode": "MOG2",

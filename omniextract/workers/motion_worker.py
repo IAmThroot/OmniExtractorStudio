@@ -100,12 +100,13 @@ class MotionExtractionWorker(QThread):
                 # 3. ONNX Inference
                 results = ort_session.run(None, {input_name: im})[0]
                 
-                # 4. Ultra-Fast Post-Processing (Bypassing NMS)
+                # 4. Ultra-Fast Presence Detection (Bypassing Bounding Box Decoding & NMS)
                 # The YOLOv8 raw ONNX output shape is (1, 84, 8400) where:
                 # - rows 0-3 are bounding box coordinates
                 # - rows 4-83 are the 80 COCO class confidence scores
-                # We simply slice out the scores for our target classes (people, vehicles, animals)
-                # and check if the absolute highest confidence among all 8400 anchors exceeds our threshold!
+                # For motion/presence gating, we do not require full object localization or NMS.
+                # We slice the scores for our target classes (people, vehicles, animals) and check
+                # if the peak presence confidence among all anchors exceeds the trigger threshold.
                 scores = results[0, 4:84, :]
                 target_scores = scores[target_classes, :]
                 
