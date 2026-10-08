@@ -1,10 +1,13 @@
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QCoreApplication
 from omniextract.ui.timeline.timeline_model import TimelineModel
 
 @pytest.fixture(scope='session')
 def qapp():
-    app = QApplication.instance() or QApplication([])
+    app = QCoreApplication.instance() or QCoreApplication([])
     return app
 
 def test_timeline_model_instantiation(qapp):

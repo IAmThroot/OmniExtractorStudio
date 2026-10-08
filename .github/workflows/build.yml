@@ -32,6 +32,8 @@ jobs:
           pip install pyinstaller pytest
 
       - name: Run Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: python -m pytest tests/
 
       - name: Build Executable
@@ -77,6 +79,8 @@ jobs:
           pip install pyinstaller pytest
 
       - name: Run Tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: python -m pytest tests/
 
       - name: Build PyInstaller Binary
