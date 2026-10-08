@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..media.metadata import (
     probe_video_chapters,
     probe_video_metadata,
@@ -60,10 +61,22 @@ from ..workers import (
     AnimatedExportWorker,
     ClipExtractionWorker,
     FrameExtractionWorker,
+    InterpolationWorker,
     MotionExtractionWorker,
     MultiSegmentWorker,
     SceneActionWorker,
     SceneDetectionWorker,
+)
+from ..ai.rife import (
+    find_rife_model,
+    is_rife_available,
+    get_model_status_info,
+    RIFE_ONNX_URL,
+    RIFE_REPO_URL,
+    FLOWNET_PKL_URL,
+    FILM_NET_SAFETENSORS_URL,
+    RIFE_PRACTICAL_URL,
+    COMFY_FRAME_INTERP_URL,
 )
 from .components.drop_line_edit import DropLineEdit
 from .metadata_dialog import (
@@ -89,7 +102,7 @@ class OmniExtractStudio(QWidget):
         self.setAcceptDrops(True)
 
     def initUI(self):
-        self.setWindowTitle("OmniExtract Studio v1.1.0")
+        self.setWindowTitle(f"OmniExtract Studio v{__version__}")
         self.resize(1000, 700)
         
         icon_candidates = [
@@ -148,6 +161,10 @@ class OmniExtractStudio(QWidget):
         self.initGifWebpTab()
         self.tab_widget.addTab(self.gif_webp_tab, "GIF & WebP Maker")
         
+        self.interp_tab = QWidget()
+        self.initInterpolationTab()
+        self.tab_widget.addTab(self.interp_tab, "FPS & Interpolation")
+
         self.batch_tab = QWidget()
         self.initBatchTab()
         self.tab_widget.addTab(self.batch_tab, "Batch Queue")
@@ -702,6 +719,425 @@ class OmniExtractStudio(QWidget):
             worker.cancel_requested = True
 
     # -----------------------------
+    # FPS & Interpolation Tab
+    # -----------------------------
+
+    def initInterpolationTab(self):
+        layout = QVBoxLayout()
+
+        # 1. Source Video Properties Summary
+        info_group = QGroupBox("Source Video Properties")
+        info_layout = QHBoxLayout()
+        self.interp_src_fps_label = QLabel("<b>Source FPS:</b> --")
+        self.interp_src_duration_label = QLabel("<b>Duration:</b> --")
+        self.interp_src_resolution_label = QLabel("<b>Resolution:</b> --")
+        self.interp_src_frames_label = QLabel("<b>Frames:</b> --")
+        info_layout.addWidget(self.interp_src_fps_label)
+        info_layout.addWidget(self.interp_src_duration_label)
+        info_layout.addWidget(self.interp_src_resolution_label)
+        info_layout.addWidget(self.interp_src_frames_label)
+        info_layout.addStretch()
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+
+        # 2. Sub-Tabs Widget: Framerate Conversion vs Frame Interpolation
+        self.fps_subtab_widget = QTabWidget()
+
+        # =========================================================
+        # SUB-TAB 1: Framerate Conversion
+        # =========================================================
+        self.framerate_conv_subtab = QWidget()
+        conv_layout = QVBoxLayout(self.framerate_conv_subtab)
+
+        # Conversion Mode
+        conv_mode_group = QGroupBox("Conversion Mode")
+        conv_mode_layout = QVBoxLayout()
+
+        self.conv_mode_combo = QComboBox()
+        self.conv_mode_combo.addItems([
+            "Standard Resample (Drop / Duplicate frames, preserves speed & audio)",
+            "Frame Blending (Blend adjacent frames to smooth cadence)",
+            "Conform Playback Speed (Change FPS interpretation; speeds up / slows down video)",
+        ])
+        self.conv_mode_combo.currentTextChanged.connect(self._on_conv_mode_changed)
+        conv_mode_layout.addWidget(self.conv_mode_combo)
+
+        self.conv_mode_desc_label = QLabel(
+            "<i>Drops or duplicates frames to reach the target rate while keeping video playback speed and duration unchanged.</i>"
+        )
+        self.conv_mode_desc_label.setWordWrap(True)
+        conv_mode_layout.addWidget(self.conv_mode_desc_label)
+        conv_mode_group.setLayout(conv_mode_layout)
+        conv_layout.addWidget(conv_mode_group)
+
+        # Target Frame Rate for Conversion
+        conv_fps_group = QGroupBox("Target Frame Rate")
+        conv_fps_layout = QFormLayout()
+
+        self.conv_fps_preset_combo = QComboBox()
+        self.conv_fps_preset_combo.addItems([
+            "24 FPS (Cinematic standard)",
+            "25 FPS (PAL)",
+            "29.97 FPS (NTSC)",
+            "30 FPS (Standard web/mobile)",
+            "50 FPS (PAL High)",
+            "59.94 FPS (NTSC High)",
+            "60 FPS (High smoothness)",
+            "120 FPS",
+            "0.5x Half Speed",
+            "2x Double Speed",
+            "Custom",
+        ])
+        self.conv_fps_preset_combo.setCurrentText("24 FPS (Cinematic standard)")
+        self.conv_fps_preset_combo.currentTextChanged.connect(self._on_conv_preset_changed)
+        conv_fps_layout.addRow("Preset:", self.conv_fps_preset_combo)
+
+        self.conv_fps_spin = QDoubleSpinBox()
+        self.conv_fps_spin.setRange(1.0, 360.0)
+        self.conv_fps_spin.setValue(24.0)
+        self.conv_fps_spin.setDecimals(3)
+        self.conv_fps_spin.setSuffix(" FPS")
+        conv_fps_layout.addRow("Target FPS:", self.conv_fps_spin)
+
+        conv_fps_group.setLayout(conv_fps_layout)
+        conv_layout.addWidget(conv_fps_group)
+
+        # Output & Encoding for Conversion
+        conv_enc_group = QGroupBox("Output & Encoding")
+        conv_enc_layout = QFormLayout()
+
+        self.conv_codec_combo = QComboBox()
+        self.conv_codec_combo.addItems([
+            "H.264 (Default - libx264)",
+            "H.265 / HEVC (libx265)",
+            "Hardware Accelerated (Auto)",
+        ])
+        conv_enc_layout.addRow("Video Codec:", self.conv_codec_combo)
+
+        self.conv_crf_spin = QSpinBox()
+        self.conv_crf_spin.setRange(0, 51)
+        self.conv_crf_spin.setValue(20)
+        self.conv_crf_spin.setToolTip("Lower means higher quality. 18-23 is visually transparent.")
+        conv_enc_layout.addRow("Quality (CRF):", self.conv_crf_spin)
+
+        self.conv_audio_combo = QComboBox()
+        self.conv_audio_combo.addItems([
+            "Keep Audio (Stream Copy)",
+            "Mute / Strip Audio",
+        ])
+        conv_enc_layout.addRow("Audio Track:", self.conv_audio_combo)
+
+        conv_enc_group.setLayout(conv_enc_layout)
+        conv_layout.addWidget(conv_enc_group)
+
+        # Progress & Actions for Conversion
+        self.conv_progress_label = QLabel("Ready")
+        self.conv_progress_bar = QProgressBar()
+        self.conv_progress_bar.setRange(0, 100)
+
+        conv_btn_layout = QHBoxLayout()
+        self.conv_start_btn = QPushButton("Convert Framerate")
+        self.conv_start_btn.clicked.connect(self.startFramerateConversion)
+
+        self.conv_queue_btn = QPushButton("Send to Batch Queue")
+        self.conv_queue_btn.clicked.connect(self.queueCurrentFramerateConversionJob)
+
+        self.conv_cancel_btn = QPushButton("Cancel")
+        self.conv_cancel_btn.clicked.connect(self.cancelFramerateConversion)
+        self.conv_cancel_btn.setEnabled(False)
+
+        conv_btn_layout.addWidget(self.conv_start_btn)
+        conv_btn_layout.addWidget(self.conv_queue_btn)
+        conv_btn_layout.addWidget(self.conv_cancel_btn)
+        conv_btn_layout.addStretch()
+
+        conv_layout.addWidget(self.conv_progress_label)
+        conv_layout.addWidget(self.conv_progress_bar)
+        conv_layout.addLayout(conv_btn_layout)
+        conv_layout.addStretch()
+
+        self.fps_subtab_widget.addTab(self.framerate_conv_subtab, "Framerate Conversion")
+
+        # =========================================================
+        # SUB-TAB 2: Frame Interpolation
+        # =========================================================
+        self.frame_interp_subtab = QWidget()
+        interp_layout = QVBoxLayout(self.frame_interp_subtab)
+
+        # Target Frame Rate for Interpolation
+        interp_fps_group = QGroupBox("Target Frame Rate")
+        interp_fps_layout = QFormLayout()
+
+        self.interp_fps_preset_combo = QComboBox()
+        self.interp_fps_preset_combo.addItems([
+            "2x Source FPS",
+            "4x Source FPS",
+            "60 FPS (Smooth)",
+            "120 FPS (High Refresh)",
+            "144 FPS",
+            "Custom",
+        ])
+        self.interp_fps_preset_combo.setCurrentText("60 FPS (Smooth)")
+        self.interp_fps_preset_combo.currentTextChanged.connect(self._on_interp_preset_changed)
+        interp_fps_layout.addRow("Preset:", self.interp_fps_preset_combo)
+
+        self.interp_fps_spin = QDoubleSpinBox()
+        self.interp_fps_spin.setRange(1.0, 360.0)
+        self.interp_fps_spin.setValue(60.0)
+        self.interp_fps_spin.setDecimals(3)
+        self.interp_fps_spin.setSuffix(" FPS")
+        self.interp_fps_spin.valueChanged.connect(self._on_interp_fps_spin_changed)
+        interp_fps_layout.addRow("Target FPS:", self.interp_fps_spin)
+
+        interp_fps_group.setLayout(interp_fps_layout)
+        interp_layout.addWidget(interp_fps_group)
+
+        # Interpolation Engine & Algorithm
+        engine_group = QGroupBox("Interpolation Engine & Algorithm")
+        engine_layout = QFormLayout()
+
+        self.interp_engine_combo = QComboBox()
+        self.interp_engine_combo.addItems([
+            "FFmpeg Motion Interpolation (MCI)",
+            "AI Neural Interpolation (RIFE / FILM)",
+        ])
+        self.interp_engine_combo.currentTextChanged.connect(self._on_interp_engine_changed)
+        engine_layout.addRow("Engine:", self.interp_engine_combo)
+
+        # Motion Compensated Options Container (MCI)
+        self.interp_mci_container = QWidget()
+        mci_layout = QFormLayout(self.interp_mci_container)
+        mci_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.interp_mc_combo = QComboBox()
+        self.interp_mc_combo.addItems([
+            "aobmc (Adaptive Overlapped Block - Recommended)",
+            "obmc (Overlapped Block)"
+        ])
+        mci_layout.addRow("Motion Compensation:", self.interp_mc_combo)
+
+        self.interp_me_combo = QComboBox()
+        self.interp_me_combo.addItems([
+            "epzs (Fast Diamond Search)",
+            "hexbs (Balanced Hexagonal)",
+            "esa (Exhaustive High Quality)"
+        ])
+        mci_layout.addRow("Motion Estimation:", self.interp_me_combo)
+
+        self.interp_scd_check = QCheckBox("Prevent morphing/ghosting across scene cuts")
+        self.interp_scd_check.setChecked(True)
+        self.interp_scd_check.toggled.connect(lambda checked: self.interp_scd_thresh_spin.setEnabled(checked))
+        mci_layout.addRow("Scene Cut Guard:", self.interp_scd_check)
+
+        self.interp_scd_thresh_spin = QDoubleSpinBox()
+        self.interp_scd_thresh_spin.setRange(1.0, 100.0)
+        self.interp_scd_thresh_spin.setValue(10.0)
+        self.interp_scd_thresh_spin.setSuffix(" %")
+        mci_layout.addRow("Cut Sensitivity:", self.interp_scd_thresh_spin)
+
+        engine_layout.addRow(self.interp_mci_container)
+
+        # RIFE AI Container
+        self.interp_rife_container = QWidget()
+        rife_layout = QVBoxLayout(self.interp_rife_container)
+        rife_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.rife_status_label = QLabel()
+        self.rife_status_label.setWordWrap(True)
+        self._update_rife_status_display()
+        rife_layout.addWidget(self.rife_status_label)
+
+        rife_btn_layout = QHBoxLayout()
+        self.rife_browse_btn = QPushButton("Select Custom Model...")
+        self.rife_browse_btn.clicked.connect(self._browse_rife_model)
+        self.rife_guide_btn = QPushButton("Model Download Instructions")
+        self.rife_guide_btn.clicked.connect(self._show_rife_download_guide)
+        rife_btn_layout.addWidget(self.rife_browse_btn)
+        rife_btn_layout.addWidget(self.rife_guide_btn)
+        rife_btn_layout.addStretch()
+        rife_layout.addLayout(rife_btn_layout)
+
+        self.interp_rife_container.setVisible(False)
+        engine_layout.addRow(self.interp_rife_container)
+
+        engine_group.setLayout(engine_layout)
+        interp_layout.addWidget(engine_group)
+
+        # Output & Encoding for Interpolation
+        enc_group = QGroupBox("Output & Encoding")
+        enc_layout = QFormLayout()
+
+        self.interp_codec_combo = QComboBox()
+        self.interp_codec_combo.addItems([
+            "H.264 (Default - libx264)",
+            "H.265 / HEVC (libx265)",
+            "Hardware Accelerated (Auto)"
+        ])
+        enc_layout.addRow("Video Codec:", self.interp_codec_combo)
+
+        self.interp_crf_spin = QSpinBox()
+        self.interp_crf_spin.setRange(0, 51)
+        self.interp_crf_spin.setValue(20)
+        self.interp_crf_spin.setToolTip("Lower means higher quality. 18-23 is visually transparent.")
+        enc_layout.addRow("Quality (CRF):", self.interp_crf_spin)
+
+        self.interp_audio_combo = QComboBox()
+        self.interp_audio_combo.addItems([
+            "Keep Audio (Stream Copy)",
+            "Mute / Strip Audio"
+        ])
+        enc_layout.addRow("Audio Track:", self.interp_audio_combo)
+
+        enc_group.setLayout(enc_layout)
+        interp_layout.addWidget(enc_group)
+
+        # Progress & Actions for Interpolation
+        self.interp_progress_label = QLabel("Ready")
+        self.interp_progress_bar = QProgressBar()
+        self.interp_progress_bar.setRange(0, 100)
+
+        btn_layout = QHBoxLayout()
+        self.interp_start_btn = QPushButton("Start Interpolation")
+        self.interp_start_btn.clicked.connect(self.startInterpolation)
+
+        self.interp_queue_btn = QPushButton("Send to Batch Queue")
+        self.interp_queue_btn.clicked.connect(self.queueCurrentInterpolationJob)
+
+        self.interp_cancel_btn = QPushButton("Cancel")
+        self.interp_cancel_btn.clicked.connect(self.cancelInterpolation)
+        self.interp_cancel_btn.setEnabled(False)
+
+        btn_layout.addWidget(self.interp_start_btn)
+        btn_layout.addWidget(self.interp_queue_btn)
+        btn_layout.addWidget(self.interp_cancel_btn)
+        btn_layout.addStretch()
+
+        interp_layout.addWidget(self.interp_progress_label)
+        interp_layout.addWidget(self.interp_progress_bar)
+        interp_layout.addLayout(btn_layout)
+        interp_layout.addStretch()
+
+        self.fps_subtab_widget.addTab(self.frame_interp_subtab, "Frame Interpolation")
+
+        layout.addWidget(self.fps_subtab_widget)
+        self.interp_tab.setLayout(layout)
+
+    def _on_conv_mode_changed(self, text):
+        if "Resample" in text:
+            self.conv_mode_desc_label.setText(
+                "<i>Drops or duplicates frames to reach the target rate while preserving video playback speed and duration.</i>"
+            )
+        elif "Blend" in text:
+            self.conv_mode_desc_label.setText(
+                "<i>Blends adjacent frames together to reach the target rate, softening judder for framerate reductions.</i>"
+            )
+        elif "Conform" in text:
+            self.conv_mode_desc_label.setText(
+                "<i>Re-interprets frame playback speed without dropping or duplicating any frames (speeds up or slows down footage).</i>"
+            )
+
+    def _on_conv_preset_changed(self, text):
+        fps = 0.0
+        if getattr(self, "current_metadata", None):
+            fps = self.current_metadata.get("RawFPS", 0.0) or self.current_metadata.get("Fps", 0.0)
+        if "24 FPS" in text:
+            self.conv_fps_spin.setValue(24.0)
+        elif "25 FPS" in text:
+            self.conv_fps_spin.setValue(25.0)
+        elif "29.97 FPS" in text:
+            self.conv_fps_spin.setValue(29.970)
+        elif "30 FPS" in text:
+            self.conv_fps_spin.setValue(30.0)
+        elif "50 FPS" in text:
+            self.conv_fps_spin.setValue(50.0)
+        elif "59.94 FPS" in text:
+            self.conv_fps_spin.setValue(59.940)
+        elif "60 FPS" in text:
+            self.conv_fps_spin.setValue(60.0)
+        elif "120 FPS" in text:
+            self.conv_fps_spin.setValue(120.0)
+        elif "0.5x" in text and fps > 0:
+            self.conv_fps_spin.setValue(fps * 0.5)
+        elif "2x" in text and fps > 0:
+            self.conv_fps_spin.setValue(fps * 2.0)
+
+    def _update_conv_target_fps(self):
+        self._on_conv_preset_changed(self.conv_fps_preset_combo.currentText())
+
+    def _update_rife_status_display(self):
+        status_text, is_ready, model_path = get_model_status_info(getattr(self, "custom_rife_path", None))
+        if is_ready:
+            color = "#e67e22" if ("CPU Only" in status_text or "⚠" in status_text) else "#27ae60"
+            self.rife_status_label.setText(
+                f"<span style='color: {color};'><b>{status_text}</b></span>"
+            )
+        elif model_path:
+            self.rife_status_label.setText(
+                f"<span style='color: #e67e22;'><b>{status_text}</b></span>"
+            )
+        else:
+            self.rife_status_label.setText(
+                "<span style='color: #e67e22;'><b>⚠ Model Not Found:</b> Place <code>RIFE_fp32.onnx</code> in <code>assets/models/</code> or click Browse.</span>"
+            )
+
+    def _browse_rife_model(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Interpolation Model", "",
+            "Supported Models (*.onnx *.pkl *.safetensors);;ONNX Models (*.onnx);;Pickle Weights (*.pkl);;SafeTensors (*.safetensors);;All Files (*)"
+        )
+        if path and os.path.isfile(path):
+            self.custom_rife_path = path
+            self._update_rife_status_display()
+
+    def _show_rife_download_guide(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("AI Interpolation Models Download Guide")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(
+            "<h3>AI Frame Interpolation Models</h3>"
+            "<p>For high-quality neural frame interpolation, download the pre-converted ONNX model:</p>"
+            "<h4>RIFE FP32 ONNX (<code>RIFE_fp32.onnx</code> - Recommended)</h4>"
+            "<ul>"
+            f"<li><b>Direct Download:</b> <br><a href='{RIFE_ONNX_URL}'>{RIFE_ONNX_URL}</a></li>"
+            f"<li><b>Hugging Face Repository:</b> <br><a href='{RIFE_REPO_URL}'>{RIFE_REPO_URL}</a></li>"
+            "</ul>"
+            "<p><b>Where to place:</b> Save into <code>assets/models/RIFE_fp32.onnx</code> or use the <b>Select Custom Model</b> button.</p>"
+            "<p><i>Runs natively via the built-in ONNX Runtime with zero PyTorch dependencies. Alternatively, you can use <b>FFmpeg Motion Interpolation (MCI)</b> which runs out of the box with zero external model downloads.</i></p>"
+        )
+        msg.exec()
+
+    def _on_interp_engine_changed(self, text):
+        is_mci = ("MCI" in text)
+        is_rife = ("RIFE" in text or "FILM" in text)
+        self.interp_mci_container.setVisible(is_mci)
+        self.interp_rife_container.setVisible(is_rife)
+
+    def _on_interp_preset_changed(self, text):
+        fps = 0.0
+        if getattr(self, "current_metadata", None):
+            fps = self.current_metadata.get("RawFPS", 0.0) or self.current_metadata.get("Fps", 0.0)
+        if "2x" in text and fps > 0:
+            self.interp_fps_spin.setValue(fps * 2.0)
+        elif "4x" in text and fps > 0:
+            self.interp_fps_spin.setValue(fps * 4.0)
+        elif "60 FPS" in text:
+            self.interp_fps_spin.setValue(60.0)
+        elif "30 FPS" in text:
+            self.interp_fps_spin.setValue(30.0)
+        elif "24 FPS" in text:
+            self.interp_fps_spin.setValue(24.0)
+        elif "120 FPS" in text:
+            self.interp_fps_spin.setValue(120.0)
+        elif "144 FPS" in text:
+            self.interp_fps_spin.setValue(144.0)
+
+    def _on_interp_fps_spin_changed(self, val):
+        pass
+
+    def _update_interp_target_fps(self):
+        self._on_interp_preset_changed(self.interp_fps_preset_combo.currentText())
+
+    # -----------------------------
     # Clip tab
     def initClipTab(self):
         layout = QVBoxLayout()
@@ -920,6 +1356,20 @@ class OmniExtractStudio(QWidget):
         )
         self.clip_end_frame_spinbox.setValue(frame_count)
         
+        if hasattr(self, "interp_src_fps_label"):
+            fps = self.current_metadata.get("RawFPS", 0.0) or self.current_metadata.get("Fps", 0.0)
+            self.interp_src_fps_label.setText(
+                f"<b>Source FPS:</b> {fps:.2f}" if fps > 0 else "<b>Source FPS:</b> Unknown"
+            )
+            self.interp_src_duration_label.setText(f"<b>Duration:</b> {duration_text(duration_ms)}")
+            w = self.current_metadata.get("Width", 0)
+            h = self.current_metadata.get("Height", 0)
+            self.interp_src_resolution_label.setText(f"<b>Resolution:</b> {w}x{h}")
+            self.interp_src_frames_label.setText(f"<b>Frames:</b> {frame_count:,}")
+            if hasattr(self, "_update_conv_target_fps"):
+                self._update_conv_target_fps()
+            self._update_interp_target_fps()
+
         self._probe_subtitle_tracks()
 
     @staticmethod
@@ -2167,6 +2617,306 @@ class OmniExtractStudio(QWidget):
         )
 
     # -----------------------------
+    # Framerate Conversion Actions
+    # -----------------------------
+
+    def startFramerateConversion(self):
+        if not hasattr(self, "source_file") or not self.source_file:
+            QMessageBox.warning(self, "No Source Video", "Please select a source video first.")
+            return
+
+        target_fps = self.conv_fps_spin.value()
+        mode_text = self.conv_mode_combo.currentText()
+        if "Resample" in mode_text:
+            engine = "resample"
+            mi_mode = "mci"
+        elif "Blend" in mode_text:
+            engine = "ffmpeg"
+            mi_mode = "blend"
+        elif "Conform" in mode_text:
+            engine = "conform"
+            mi_mode = "mci"
+        else:
+            engine = "resample"
+            mi_mode = "mci"
+
+        codec_text = self.conv_codec_combo.currentText()
+        hwaccel_enabled = ("Hardware" in codec_text)
+        if "H.265" in codec_text:
+            video_codec = "libx265"
+        else:
+            video_codec = "libx264"
+
+        quality_crf = self.conv_crf_spin.value()
+        audio_mode = "mute" if "Mute" in self.conv_audio_combo.currentText() else "copy"
+
+        base_name = os.path.splitext(os.path.basename(self.source_file))[0]
+        default_out = f"{base_name}_{int(target_fps)}fps.mp4"
+
+        if getattr(self, "in_batch_mode", False) and hasattr(self, "save_dir"):
+            save_path = os.path.join(self.save_dir, default_out)
+            counter = 1
+            while os.path.exists(save_path):
+                save_path = os.path.join(self.save_dir, f"{base_name}_{int(target_fps)}fps_{counter}.mp4")
+                counter += 1
+        else:
+            save_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Converted Video",
+                os.path.join(getattr(self, "save_dir", ""), default_out),
+                "MP4 Video (*.mp4);;MKV Video (*.mkv);;All Files (*)"
+            )
+            if not save_path:
+                return
+
+        duration_ms = self.current_metadata.get("DurationMs", 0) if getattr(self, "current_metadata", None) else 0
+        src_fps = 0.0
+        if getattr(self, "current_metadata", None):
+            src_fps = self.current_metadata.get("RawFPS", 0.0) or self.current_metadata.get("Fps", 0.0)
+
+        self.conv_start_btn.setEnabled(False)
+        self.conv_cancel_btn.setEnabled(True)
+        self.conv_progress_bar.setValue(0)
+        self.conv_progress_label.setText("Starting framerate conversion...")
+
+        self.conv_worker = InterpolationWorker(
+            source_file=self.source_file,
+            output_path=save_path,
+            target_fps=target_fps,
+            duration_ms=duration_ms,
+            source_fps=src_fps,
+            engine=engine,
+            mi_mode=mi_mode,
+            mc_mode="aobmc",
+            me_algo="epzs",
+            scd_enabled=True,
+            scd_threshold=10.0,
+            video_codec=video_codec,
+            quality_crf=quality_crf,
+            hwaccel_enabled=hwaccel_enabled,
+            audio_mode=audio_mode,
+        )
+        self.conv_worker.progress.connect(self._on_conv_progress)
+        self.conv_worker.finished.connect(self._on_conv_finished)
+        self.conv_worker.start()
+
+    def cancelFramerateConversion(self):
+        if hasattr(self, "conv_worker") and self.conv_worker is not None:
+            self.conv_cancel_btn.setEnabled(False)
+            self.conv_progress_label.setText("Cancelling conversion...")
+            self.conv_worker.cancel()
+
+    def _on_conv_progress(self, percent, message):
+        self.conv_progress_bar.setValue(percent)
+        self.conv_progress_label.setText(message)
+
+    def _on_conv_finished(self, success, cancelled, path, error):
+        self.conv_start_btn.setEnabled(True)
+        self.conv_cancel_btn.setEnabled(False)
+
+        if cancelled:
+            self.conv_progress_label.setText("Framerate conversion cancelled.")
+            if not getattr(self, "in_batch_mode", False):
+                QMessageBox.information(self, "Cancelled", "Framerate conversion process was cancelled.")
+        elif success:
+            self.conv_progress_label.setText(f"Finished: {os.path.basename(path)}")
+            if not getattr(self, "in_batch_mode", False):
+                QMessageBox.information(
+                    self, "Complete",
+                    f"Video framerate converted successfully!\n\nSaved to:\n{path}"
+                )
+        else:
+            self.conv_progress_label.setText("Error during framerate conversion.")
+            if not getattr(self, "in_batch_mode", False):
+                QMessageBox.critical(
+                    self, "Conversion Failed",
+                    f"An error occurred during framerate conversion:\n\n{error or 'Unknown error'}"
+                )
+
+    def queueCurrentFramerateConversionJob(self):
+        if not getattr(self, "source_file", None):
+            QMessageBox.warning(self, "No Video", "Please load a video first.")
+            return
+
+        state = self.gather_app_state(is_custom_job=True)
+        state["target_tab"] = 4
+        state["fps_subtab"] = 0
+
+        name = os.path.basename(self.source_file)
+        target_fps = self.conv_fps_spin.value()
+        item = QListWidgetItem(f"{name} [Convert to {target_fps:.0f} FPS]")
+        item.setData(Qt.ItemDataRole.UserRole, {
+            "path": self.source_file,
+            "state": state,
+            "mode": "Framerate Conversion"
+        })
+        self.batch_list.addItem(item)
+
+        if self.source_file not in self.batch_queue:
+            self.batch_queue.append(self.source_file)
+
+        QMessageBox.information(self, "Queued", f"Added {name} to Batch Queue with current framerate conversion settings.")
+
+    # -----------------------------
+    # Frame Interpolation Actions
+    # -----------------------------
+
+    def startInterpolation(self):
+        if not hasattr(self, "source_file") or not self.source_file:
+            QMessageBox.warning(self, "No Source Video", "Please select a source video first.")
+            return
+
+        target_fps = self.interp_fps_spin.value()
+        engine_text = self.interp_engine_combo.currentText()
+        if "RIFE" in engine_text or "FILM" in engine_text:
+            status_text, is_ready, model_path = get_model_status_info(getattr(self, "custom_rife_path", None))
+            if not model_path:
+                QMessageBox.warning(
+                    self, "AI Model Missing",
+                    "Interpolation model was not found.\n\n"
+                    "Please place 'RIFE_fp32.onnx' in 'assets/models/' or click 'Select Custom Model'."
+                )
+                return
+            if not is_ready:
+                QMessageBox.warning(
+                    self, "AI Model Environment Not Ready",
+                    f"{status_text}\n\n"
+                    "Tip: You can use 'FFmpeg Motion Interpolation (MCI)' to interpolate frames right now without any additional dependencies!"
+                )
+                return
+            engine = "rife"
+            mi_mode = "mci"
+        else:
+            engine = "ffmpeg"
+            mi_mode = "mci"
+
+        mc_mode = "aobmc" if "aobmc" in self.interp_mc_combo.currentText() else "obmc"
+        me_algo = "epzs"
+        if "hexbs" in self.interp_me_combo.currentText():
+            me_algo = "hexbs"
+        elif "esa" in self.interp_me_combo.currentText():
+            me_algo = "esa"
+
+        scd_enabled = self.interp_scd_check.isChecked()
+        scd_threshold = self.interp_scd_thresh_spin.value()
+
+        codec_text = self.interp_codec_combo.currentText()
+        hwaccel_enabled = ("Hardware" in codec_text)
+        if "H.265" in codec_text:
+            video_codec = "libx265"
+        else:
+            video_codec = "libx264"
+
+        quality_crf = self.interp_crf_spin.value()
+        audio_mode = "mute" if "Mute" in self.interp_audio_combo.currentText() else "copy"
+
+        base_name = os.path.splitext(os.path.basename(self.source_file))[0]
+        default_out = f"{base_name}_{int(target_fps)}fps_interpolated.mp4"
+
+        if getattr(self, "in_batch_mode", False) and hasattr(self, "save_dir"):
+            save_path = os.path.join(self.save_dir, default_out)
+            counter = 1
+            while os.path.exists(save_path):
+                save_path = os.path.join(self.save_dir, f"{base_name}_{int(target_fps)}fps_interpolated_{counter}.mp4")
+                counter += 1
+        else:
+            save_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Interpolated Video",
+                os.path.join(getattr(self, "save_dir", ""), default_out),
+                "MP4 Video (*.mp4);;MKV Video (*.mkv);;All Files (*)"
+            )
+            if not save_path:
+                return
+
+        duration_ms = self.current_metadata.get("DurationMs", 0) if getattr(self, "current_metadata", None) else 0
+        src_fps = 0.0
+        if getattr(self, "current_metadata", None):
+            src_fps = self.current_metadata.get("RawFPS", 0.0) or self.current_metadata.get("Fps", 0.0)
+
+        self.interp_start_btn.setEnabled(False)
+        self.interp_cancel_btn.setEnabled(True)
+        self.interp_progress_bar.setValue(0)
+        self.interp_progress_label.setText("Starting interpolation...")
+
+        self.interp_worker = InterpolationWorker(
+            source_file=self.source_file,
+            output_path=save_path,
+            target_fps=target_fps,
+            duration_ms=duration_ms,
+            source_fps=src_fps,
+            engine=engine,
+            mi_mode=mi_mode,
+            mc_mode=mc_mode,
+            me_algo=me_algo,
+            scd_enabled=scd_enabled,
+            scd_threshold=scd_threshold,
+            video_codec=video_codec,
+            quality_crf=quality_crf,
+            hwaccel_enabled=hwaccel_enabled,
+            audio_mode=audio_mode,
+            rife_model_path=getattr(self, "custom_rife_path", None),
+        )
+        self.interp_worker.progress.connect(self._on_interpolation_progress)
+        self.interp_worker.finished.connect(self._on_interpolation_finished)
+        self.interp_worker.start()
+
+    def cancelInterpolation(self):
+        if hasattr(self, "interp_worker") and self.interp_worker is not None:
+            self.interp_cancel_btn.setEnabled(False)
+            self.interp_progress_label.setText("Cancelling interpolation...")
+            self.interp_worker.cancel()
+
+    def _on_interpolation_progress(self, percent, message):
+        self.interp_progress_bar.setValue(percent)
+        self.interp_progress_label.setText(message)
+
+    def _on_interpolation_finished(self, success, cancelled, path, error):
+        self.interp_start_btn.setEnabled(True)
+        self.interp_cancel_btn.setEnabled(False)
+
+        if cancelled:
+            self.interp_progress_label.setText("Interpolation cancelled.")
+            if not getattr(self, "in_batch_mode", False):
+                QMessageBox.information(self, "Cancelled", "Interpolation process was cancelled.")
+        elif success:
+            self.interp_progress_label.setText(f"Finished: {os.path.basename(path)}")
+            if not getattr(self, "in_batch_mode", False):
+                QMessageBox.information(
+                    self, "Complete",
+                    f"Video successfully interpolated!\n\nSaved to:\n{path}"
+                )
+        else:
+            self.interp_progress_label.setText("Error during interpolation.")
+            if not getattr(self, "in_batch_mode", False):
+                QMessageBox.critical(
+                    self, "Interpolation Failed",
+                    f"An error occurred during interpolation:\n\n{error or 'Unknown error'}"
+                )
+
+    def queueCurrentInterpolationJob(self):
+        if not getattr(self, "source_file", None):
+            QMessageBox.warning(self, "No Video", "Please load a video first.")
+            return
+
+        state = self.gather_app_state(is_custom_job=True)
+        state["target_tab"] = 4
+        state["fps_subtab"] = 1
+
+        name = os.path.basename(self.source_file)
+        target_fps = self.interp_fps_spin.value()
+        item = QListWidgetItem(f"{name} [Interpolate to {target_fps:.0f} FPS]")
+        item.setData(Qt.ItemDataRole.UserRole, {
+            "path": self.source_file,
+            "state": state,
+            "mode": "Frame Interpolation"
+        })
+        self.batch_list.addItem(item)
+
+        if self.source_file not in self.batch_queue:
+            self.batch_queue.append(self.source_file)
+
+        QMessageBox.information(self, "Queued", f"Added {name} to Batch Queue with current interpolation settings.")
+
+    # -----------------------------
     # Output helpers
     # -----------------------------
 
@@ -2288,7 +3038,7 @@ class OmniExtractStudio(QWidget):
         mode, ok = QInputDialog.getItem(
             self, "Select Job Type", 
             "What action should be performed on these videos?", 
-            ["Extract Frames", "Extract Clip", "Motion Highlights", "GIF/WebP"], 
+            ["Extract Frames", "Extract Clip", "Motion Highlights", "GIF/WebP", "Framerate Conversion", "Frame Interpolation"], 
             0, False
         )
         if not ok:
@@ -2302,6 +3052,12 @@ class OmniExtractStudio(QWidget):
             state["target_tab"] = 2
         elif mode == "GIF/WebP":
             state["target_tab"] = 3
+        elif mode == "Framerate Conversion":
+            state["target_tab"] = 4
+            state["fps_subtab"] = 0
+        elif mode in ("Frame Interpolation", "Interpolate FPS"):
+            state["target_tab"] = 4
+            state["fps_subtab"] = 1
         else:
             state["target_tab"] = 0
             
@@ -2368,7 +3124,7 @@ class OmniExtractStudio(QWidget):
 
     def process_next_batch_item(self):
         # Clean up any leftover workers
-        for w_name in ["frame_worker", "clip_worker", "motion_worker", "animation_worker"]:
+        for w_name in ["frame_worker", "clip_worker", "motion_worker", "animation_worker", "interp_worker", "conv_worker"]:
             worker = getattr(self, w_name, None)
             if worker is not None:
                 worker.deleteLater()
@@ -2405,14 +3161,22 @@ class OmniExtractStudio(QWidget):
         
         if "Motion" in mode:
             self.tab_widget.setCurrentWidget(self.motion_tab)
-        elif "Convert" in mode or "Extract Clip" in mode:
+        elif "Extract Clip" in mode or (mode.startswith("Convert") and "Framerate" not in mode):
             self.tab_widget.setCurrentWidget(self.clip_tab)
         elif "GIF" in mode or "WebP" in mode:
             self.tab_widget.setCurrentWidget(self.gif_webp_tab)
+        elif "Framerate Conversion" in mode:
+            self.tab_widget.setCurrentWidget(self.interp_tab)
+            if hasattr(self, "fps_subtab_widget"):
+                self.fps_subtab_widget.setCurrentIndex(0)
+        elif "Interpolat" in mode:
+            self.tab_widget.setCurrentWidget(self.interp_tab)
+            if hasattr(self, "fps_subtab_widget"):
+                self.fps_subtab_widget.setCurrentIndex(1)
         else:
             self.tab_widget.setCurrentWidget(self.frame_tab)
 
-        if "Convert" in mode or "Extract Clip" in mode:
+        if "Extract Clip" in mode or (mode.startswith("Convert") and "Framerate" not in mode):
             if state is None and self.current_metadata:
                 frames = int(self.current_metadata.get("Total Frames", "0").replace(",", ""))
                 self.clip_start_frame_spinbox.setValue(0)
@@ -2466,6 +3230,32 @@ class OmniExtractStudio(QWidget):
                 self.animation_worker.finished.disconnect()
                 self.animation_worker.finished.connect(self._on_animation_export_finished)
                 self.animation_worker.finished.connect(on_batch_animation_finished)
+
+        elif "Framerate Conversion" in mode:
+            self.startFramerateConversion()
+            if hasattr(self, "conv_worker") and self.conv_worker is not None:
+                def on_batch_conv_finished(success, cancelled, path, err):
+                    if not cancelled:
+                        self.batch_completed += 1
+                        QTimer.singleShot(100, self.process_next_batch_item)
+                    else:
+                        self.in_batch_mode = False
+                self.conv_worker.finished.disconnect()
+                self.conv_worker.finished.connect(self._on_conv_finished)
+                self.conv_worker.finished.connect(on_batch_conv_finished)
+
+        elif "Interpolat" in mode:
+            self.startInterpolation()
+            if hasattr(self, "interp_worker") and self.interp_worker is not None:
+                def on_batch_interp_finished(success, cancelled, path, err):
+                    if not cancelled:
+                        self.batch_completed += 1
+                        QTimer.singleShot(100, self.process_next_batch_item)
+                    else:
+                        self.in_batch_mode = False
+                self.interp_worker.finished.disconnect()
+                self.interp_worker.finished.connect(self._on_interpolation_finished)
+                self.interp_worker.finished.connect(on_batch_interp_finished)
 
         else:
             if state is None:
@@ -2565,6 +3355,27 @@ class OmniExtractStudio(QWidget):
             "gif_quality": self.gif_quality_spin.value(),
         }
         
+        if hasattr(self, "fps_subtab_widget"):
+            state["fps_subtab"] = self.fps_subtab_widget.currentIndex()
+        if hasattr(self, "conv_mode_combo"):
+            state["conv_mode"] = self.conv_mode_combo.currentText()
+            state["conv_fps_preset"] = self.conv_fps_preset_combo.currentText()
+            state["conv_fps"] = self.conv_fps_spin.value()
+            state["conv_codec"] = self.conv_codec_combo.currentText()
+            state["conv_crf"] = self.conv_crf_spin.value()
+            state["conv_audio"] = self.conv_audio_combo.currentText()
+        if hasattr(self, "interp_fps_spin"):
+            state["interp_fps_preset"] = self.interp_fps_preset_combo.currentText()
+            state["interp_fps"] = self.interp_fps_spin.value()
+            state["interp_engine"] = self.interp_engine_combo.currentText()
+            state["interp_mc"] = self.interp_mc_combo.currentText()
+            state["interp_me"] = self.interp_me_combo.currentText()
+            state["interp_scd"] = self.interp_scd_check.isChecked()
+            state["interp_scd_threshold"] = self.interp_scd_thresh_spin.value()
+            state["interp_codec"] = self.interp_codec_combo.currentText()
+            state["interp_crf"] = self.interp_crf_spin.value()
+            state["interp_audio"] = self.interp_audio_combo.currentText()
+        
         if is_custom_job:
             state["frame_start_time"] = qtime_to_ms(self.start_time_edit.time())
             state["frame_end_time"] = qtime_to_ms(self.end_time_edit.time())
@@ -2604,6 +3415,25 @@ class OmniExtractStudio(QWidget):
         if "gif_fps" in state: self.gif_fps_combo.setCurrentText(state["gif_fps"])
         if "gif_quality" in state: self.gif_quality_spin.setValue(state["gif_quality"])
         
+        if "fps_subtab" in state and hasattr(self, "fps_subtab_widget"): self.fps_subtab_widget.setCurrentIndex(state["fps_subtab"])
+        if "conv_mode" in state and hasattr(self, "conv_mode_combo"): self.conv_mode_combo.setCurrentText(state["conv_mode"])
+        if "conv_fps_preset" in state and hasattr(self, "conv_fps_preset_combo"): self.conv_fps_preset_combo.setCurrentText(state["conv_fps_preset"])
+        if "conv_fps" in state and hasattr(self, "conv_fps_spin"): self.conv_fps_spin.setValue(state["conv_fps"])
+        if "conv_codec" in state and hasattr(self, "conv_codec_combo"): self.conv_codec_combo.setCurrentText(state["conv_codec"])
+        if "conv_crf" in state and hasattr(self, "conv_crf_spin"): self.conv_crf_spin.setValue(state["conv_crf"])
+        if "conv_audio" in state and hasattr(self, "conv_audio_combo"): self.conv_audio_combo.setCurrentText(state["conv_audio"])
+
+        if "interp_fps_preset" in state and hasattr(self, "interp_fps_preset_combo"): self.interp_fps_preset_combo.setCurrentText(state["interp_fps_preset"])
+        if "interp_fps" in state and hasattr(self, "interp_fps_spin"): self.interp_fps_spin.setValue(state["interp_fps"])
+        if "interp_engine" in state and hasattr(self, "interp_engine_combo"): self.interp_engine_combo.setCurrentText(state["interp_engine"])
+        if "interp_mc" in state and hasattr(self, "interp_mc_combo"): self.interp_mc_combo.setCurrentText(state["interp_mc"])
+        if "interp_me" in state and hasattr(self, "interp_me_combo"): self.interp_me_combo.setCurrentText(state["interp_me"])
+        if "interp_scd" in state and hasattr(self, "interp_scd_check"): self.interp_scd_check.setChecked(state["interp_scd"])
+        if "interp_scd_threshold" in state and hasattr(self, "interp_scd_thresh_spin"): self.interp_scd_thresh_spin.setValue(state["interp_scd_threshold"])
+        if "interp_codec" in state and hasattr(self, "interp_codec_combo"): self.interp_codec_combo.setCurrentText(state["interp_codec"])
+        if "interp_crf" in state and hasattr(self, "interp_crf_spin"): self.interp_crf_spin.setValue(state["interp_crf"])
+        if "interp_audio" in state and hasattr(self, "interp_audio_combo"): self.interp_audio_combo.setCurrentText(state["interp_audio"])
+
         if "frame_start_time" in state: self.start_time_edit.setTime(ms_to_qtime(state["frame_start_time"]))
         if "frame_end_time" in state: self.end_time_edit.setTime(ms_to_qtime(state["frame_end_time"]))
         
@@ -2650,6 +3480,22 @@ class OmniExtractStudio(QWidget):
             (self.gif_resolution_combo, "currentTextChanged"),
             (self.gif_fps_combo, "currentTextChanged"),
             (self.gif_quality_spin, "valueChanged"),
+            (self.conv_mode_combo, "currentTextChanged"),
+            (self.conv_fps_preset_combo, "currentTextChanged"),
+            (self.conv_fps_spin, "valueChanged"),
+            (self.conv_codec_combo, "currentTextChanged"),
+            (self.conv_crf_spin, "valueChanged"),
+            (self.conv_audio_combo, "currentTextChanged"),
+            (self.interp_fps_preset_combo, "currentTextChanged"),
+            (self.interp_fps_spin, "valueChanged"),
+            (self.interp_engine_combo, "currentTextChanged"),
+            (self.interp_mc_combo, "currentTextChanged"),
+            (self.interp_me_combo, "currentTextChanged"),
+            (self.interp_scd_check, "toggled"),
+            (self.interp_scd_thresh_spin, "valueChanged"),
+            (self.interp_codec_combo, "currentTextChanged"),
+            (self.interp_crf_spin, "valueChanged"),
+            (self.interp_audio_combo, "currentTextChanged"),
         ]
         
         for widget, signal_name in widgets:

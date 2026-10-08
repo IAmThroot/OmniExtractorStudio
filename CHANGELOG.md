@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-08
+
+### Added
+- **FPS & Interpolation Tab with Dedicated Sub-Tabs**: Separated "Framerate Conversion" and "Frame Interpolation" into distinct sub-tab workflows for clear separation of concerns.
+- **Framerate Conversion Sub-Tab**:
+  - Standard Resample (`fps` filter) for instant drop/duplicate conversion keeping speed and duration unchanged.
+  - Frame Blending (`blend`) for smooth cadence reduction.
+  - Playback Speed Conform (`setpts`) to change playback speed and interpretation (e.g. 60 FPS footage played back at 24 FPS for 0.4x slow motion) without dropping or duplicating frames.
+- **Frame Interpolation Sub-Tab**:
+  - **Motion-Compensated Interpolation (MCI)**: Zero-dependency FFmpeg `minterpolate` filter supporting Adaptive Overlapped Block Motion Compensation (`aobmc`), bidirectional motion estimation, search algorithms (`epzs`, `hexbs`, `esa`), and scene cut guard (`scd=fdiff`).
+  - **Optional AI Neural Interpolation (RIFE ONNX)**: Model manager auto-detecting `RIFE_fp32.onnx` (downloadable from Hugging Face `FuryTMP/RIFE_fp32`) or custom weights in `assets/models/`, running via the lightweight ONNX Runtime with zero PyTorch dependencies.
+- **Source Video Properties Display**: Fixed source FPS detection to reliably probe stream and container frame rates across MP4, MKV, and WebM containers.
+- **Target FPS Presets**: Quick-select rates (24, 25, 29.97, 30, 50, 59.94, 60, 120 FPS, 0.5x, 2x, 4x) and custom floating-point spinboxes.
+- **Hardware-Accelerated Encoding**: Integrated NVENC, QSV, and VAAPI encoder selection via `hwaccel.py`.
+- **Preset Profile & Batch Queue Integration**: Save and load both conversion and interpolation configurations within Presets, with distinct Batch Queue job creation for Framerate Conversion and Frame Interpolation.
+- **Interpolation Pipeline Performance & Multi-Threading**:
+  - Implemented multi-threaded Producer-Consumer queuing (`queue.Queue`) in the RIFE pipeline to decouple OpenCV frame reading, GPU inference, and FFmpeg output encoding.
+  - Added `-threads 0` and `-filter_threads 0` to FFmpeg MCI pipelines to unlock multi-core utilization.
+  - Optimized numpy tensor formatting and BGR/RGB operations in `rife.py` via native OpenCV operations.
+  - Added active device and Execution Provider diagnostics to the UI, explicitly alerting users when running on CPU vs CUDA GPU.
+  - Resolved dynamic link failure on modern Linux distributions running NVIDIA cuDNN 9+ by automatically preloading modular shared libraries (`libcudnn_ops`, `libcudnn_cnn`, `libcudnn_adv`, `libcudnn`) into the global symbol table with `RTLD_GLOBAL`.
+  - Muted non-critical ONNX Runtime C++ engine logger warnings (`conv.cc Fallback mode`) while preserving critical error reporting.
+  - Accelerated YOLO presence detection preprocessing with OpenCV C++ `cv2.dnn.blobFromImage`.
+
 ## [1.1.0] - 2026-09-01
 
 ### Added

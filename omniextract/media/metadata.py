@@ -48,12 +48,31 @@ def probe_video_metadata(video_path):
             
         # parse fps
         fps = 0.0
-        r_frame_rate = stream.get("r_frame_rate", "0/1")
-        if "/" in r_frame_rate:
-            num, den = r_frame_rate.split("/")
-            if float(den) != 0:
-                fps = float(num) / float(den)
-                    
+        for rate_key in ("r_frame_rate", "avg_frame_rate"):
+            rate_str = stream.get(rate_key, "")
+            if "/" in rate_str:
+                num, den = rate_str.split("/")
+                try:
+                    if float(den) != 0:
+                        val = float(num) / float(den)
+                        if val > 0:
+                            fps = val
+                            break
+                except (ValueError, ZeroDivisionError):
+                    pass
+
+        if fps <= 0:
+            try:
+                import cv2
+                cap = cv2.VideoCapture(video_path)
+                if cap.isOpened():
+                    c_fps = cap.get(cv2.CAP_PROP_FPS)
+                    if c_fps and c_fps > 0:
+                        fps = float(c_fps)
+                cap.release()
+            except Exception:
+                pass
+
         # parse duration
         duration_sec = float(fmt.get("duration", 0.0))
         duration_ms = int(duration_sec * 1000)
@@ -81,6 +100,7 @@ def probe_video_metadata(video_path):
         "DurationMs": duration_ms,
         "RawFrames": frame_count,
         "RawFPS": fps,
+        "Fps": fps,
         "Width": width,
         "Height": height,
         "Codec": codec or "Unknown",

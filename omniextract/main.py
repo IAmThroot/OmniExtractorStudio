@@ -4,6 +4,7 @@ import sys
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QPushButton
 
+from . import __version__
 from .ui.main_window import OmniExtractStudio
 from .ui.metadata_dialog import AboutDialog
 from .utils.resources import get_resource_path
@@ -13,7 +14,7 @@ def main():
     if sys.platform == "win32":
         try:
             import ctypes
-            app_id = "throot.omniextractstudio.app.1.1.0"
+            app_id = f"throot.omniextractstudio.app.{__version__}"
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
         except Exception:
             pass

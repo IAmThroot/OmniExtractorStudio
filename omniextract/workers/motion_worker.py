@@ -158,4 +158,7 @@ class MotionExtractionWorker(QThread):
 
                 subprocess.run(cmd, capture_output=True)
 
+        if yolo_detector:
+            yolo_detector.close()
+
         self.finished.emit(True, extracted_count, "Success")

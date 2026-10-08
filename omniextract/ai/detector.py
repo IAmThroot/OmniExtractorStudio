@@ -43,10 +43,8 @@ class YOLOPresenceDetector:
         
         padded = cv2.copyMakeBorder(resized, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
         
-        # Preprocess: BGR -> RGB, HWC -> CHW, normalize 0-255 -> 0.0-1.0
-        blob = padded[:, :, ::-1].transpose((2, 0, 1))
-        blob = np.ascontiguousarray(blob).astype(np.float32) / 255.0
-        blob = blob[np.newaxis, ...]
+        # Fast C++ preprocessing: BGR -> RGB, HWC -> CHW, 1/255.0 normalization, batch dim
+        blob = cv2.dnn.blobFromImage(padded, 1.0 / 255.0, (640, 640), swapRB=True)
         
         # Inference
         input_name = self.session.get_inputs()[0].name

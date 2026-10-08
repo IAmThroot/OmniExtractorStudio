@@ -42,3 +42,9 @@ AppDir/
 # Test and lint caches
 .pytest_cache/
 .ruff_cache/
+
+# Large model weights
+*.pkl
+*.safetensors
+assets/models/RIFE*.onnx
+assets/models/rife*.onnx

@@ -1,6 +1,6 @@
 <div align="center">
   <img src="assets/screenshots/hero_icon.png" width="128" height="128" alt="OmniExtract Studio Logo">
-  <h1>OmniExtract Studio v1.1.0</h1>
+  <h1>OmniExtract Studio v1.2.0</h1>
   <p><b>An all-in-one desktop application designed for high-precision video processing, frame extraction, intelligent motion tracking, and more.</b></p>
   
   [![GitHub Release](https://img.shields.io/github/v/release/IAmThroot/OmniExtractorStudio)](https://github.com/IAmThroot/OmniExtractorStudio/releases)
@@ -86,6 +86,10 @@ cd OmniExtractorStudio
 pip install -r requirements.txt
 ```
 
+> **💡 NVIDIA GPU Acceleration (Recommended for AI Interpolation & Detection):**
+> - **pip / Virtualenv**: `pip install onnxruntime-gpu` (replaces standard CPU `onnxruntime`)
+> - **Arch Linux / CachyOS**: `sudo pacman -S python-onnxruntime-opt-cuda` (or `python-onnxruntime-cuda`)
+
 #### 4. Launch Application
 - **Linux**:
   ```bash
@@ -158,21 +162,56 @@ Generate optimized animations:
 
 ---
 
-### 6. Subtitles & Real-Time Preview
+### 6. FPS & Framerate Tools (Conversion & Interpolation)
+The **FPS & Interpolation** tab is split into two dedicated workflows:
+
+#### Sub-Tab 1: Framerate Conversion
+Change video framerate by dropping/duplicating frames, blending, or conforming playback speed without synthesizing artificial frames:
+1. **Conversion Mode**:
+   - **Standard Resample**: Drops or duplicates frames (`fps` filter) to reach the target rate while preserving video playback speed and duration.
+   - **Frame Blending**: Blends adjacent frames to reduce judder when down-sampling high framerate video.
+   - **Conform Playback Speed**: Re-interprets frame presentation timestamps (`setpts`) to change playback speed (e.g. interpreting 60 FPS footage at 24 FPS for 0.4x cinematic slow-motion, or speeding up footage) without dropping or duplicating any frames.
+2. **Target Rate**: Presets for 24 FPS (Cinematic standard), 25 FPS (PAL), 29.97 FPS, 30 FPS, 50 FPS, 59.94 FPS, 60 FPS, 120 FPS, 0.5x, 2x, or custom spinbox.
+3. Click **Convert Framerate** or **Send to Batch Queue**.
+
+#### Sub-Tab 2: Frame Interpolation
+Generate brand new in-between frames for super-smooth playback or slow motion:
+1. **Target Framerate**: Presets (`2x Source FPS`, `4x Source FPS`, `60 FPS`, `120 FPS`, `144 FPS`) or custom spinbox up to 360 FPS.
+2. **Interpolation Engine**:
+   - **FFmpeg Motion Interpolation (MCI)**: *(Zero extra dependencies - works immediately)* High quality optical-flow interpolation utilizing FFmpeg's `minterpolate` filter.
+     - *Motion Compensation*: Adaptive Overlapped Block Motion Compensation (`aobmc` - recommended) or `obmc`.
+     - *Estimation Algorithm*: `epzs` (fast diamond search), `hexbs` (balanced hexagonal), or `esa` (exhaustive highest quality).
+     - *Scene Cut Guard*: Prevents warping or ghosting across camera cuts by detecting shot transitions (`scd=fdiff`, default sensitivity: `10.0%`).
+   - **AI Neural Interpolation (RIFE & FILM)**: Deep learning neural frame generation running locally.
+3. **Optional AI Neural Interpolation Model Setup**:
+   Download the pre-converted ONNX model:
+   - **RIFE FP32 ONNX (`RIFE_fp32.onnx` - Recommended)**:
+     - Direct Download: [RIFE_fp32.onnx (Hugging Face)](https://huggingface.co/FuryTMP/RIFE_fp32/resolve/main/RIFE_fp32.onnx)
+     - Hugging Face Repository: [FuryTMP/RIFE_fp32](https://huggingface.co/FuryTMP/RIFE_fp32/tree/main)
+   - **Where to Place**: Place the downloaded file into `assets/models/RIFE_fp32.onnx` in the OmniExtract directory, or click **Select Custom Model** in the app.
+   - *Zero PyTorch Overhead*: The ONNX model executes directly via the built-in ONNX Runtime with hardware acceleration (CUDA/DirectML/CPU)—no heavy PyTorch installation needed!
+   - **Enabling GPU Acceleration (NVIDIA CUDA)**: By default, standard `onnxruntime` or `python-onnxruntime-cpu` runs on CPU. For high-speed GPU interpolation on Linux (Arch/CachyOS), install `sudo pacman -S python-onnxruntime-opt-cuda` (or `python-onnxruntime-cuda`), or install `pip install onnxruntime-gpu` in your Python environment. When GPU acceleration is active, the app will show `(Device: NVIDIA CUDA GPU)`. Alternatively, you can use **FFmpeg Motion Interpolation (MCI)** which runs out of the box with zero model downloads.
+4. **Encoding & Audio**: Select H.264, H.265/HEVC, or Hardware Accelerated (Auto), configure CRF quality, and keep audio stream or mute.
+5. Click **Start Interpolation** or **Send to Batch Queue**.
+
+---
+
+### 7. Subtitles & Real-Time Preview
 - **Video Preview**: Click **Preview Video** to open the interactive playback window. Scrub through the timeline, view live frame timestamps, and toggle subtitle overlays.
 - **Subtitle Ripper**: Extract embedded `.srt` or `.vtt` tracks into external files.
 - **Subtitle Burner**: Hardcode subtitles directly into video frames with custom fonts, margins, and styles.
 
 ---
 
-### 7. Presets & Batch Queueing
-- **Profile Presets**: Use the top toolbar to switch between built-in workflows (e.g., *Discord Reaction GIF*, *Security Highlights*, *Archive Master*) or click **Save Preset** to store your own configuration.
+### 8. Presets & Batch Queueing
+- **Profile Presets**: Use the top toolbar to switch between built-in workflows (e.g., *Discord Reaction GIF*, *Security Highlights*, *Smooth 60 FPS Interpolation*) or click **Save Preset** to store your own configuration.
 - **Batch Processing**: Switch to the **Batch Queue** tab to process an entire folder of videos sequentially using shared or custom job parameters.
 
 ---
 
 ## ✨ Feature Overview
 
+- **FPS & Frame Interpolation**: Boost low-framerate video up to 60, 120, or 144 FPS with smooth optical-flow Motion Compensated Interpolation (MCI), scene-cut guard protection, frame blending, and optional AI Neural Interpolation (RIFE) via ONNX Runtime.
 - **Advanced Frame Extraction**: Extract frames accurately. Features an intelligent blur/sharpness filter (using Laplacian variance) to automatically discard blurry frames during extraction.
 - **Clip Cutting & Multi-Segment Export**: Non-destructively trim, chapterize, and extract multiple clips using hardware-accelerated `ffmpeg` stream copying, or re-encode them.
 - **Motion-Triggered Extraction**: Automatically isolate and extract only moments of movement (security highlights, wildlife monitoring, action shots). Choose between classical pixel-based **MOG2 background subtraction** or high-speed **YOLOv8 AI presence detection** running on an ultra-lightweight, hardware-optimized ONNX Runtime backend (zero heavy PyTorch/CUDA dependencies required). Export either representative keyframes or full continuous motion video clips.
