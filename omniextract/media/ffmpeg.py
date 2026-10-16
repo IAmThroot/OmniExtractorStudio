@@ -1,3 +1,4 @@
+import functools
 import shutil
 import subprocess
 
@@ -10,9 +11,6 @@ def get_ffmpeg_path():
 def get_ffprobe_path():
     """Find FFprobe binary on PATH."""
     return shutil.which("ffprobe")
-
-
-
 
 
 def get_ffmpeg_version():
@@ -28,6 +26,7 @@ def get_ffmpeg_version():
     except Exception:
         pass
     return "Unknown"
+
 
 def check_ffmpeg_available():
     return bool(get_ffmpeg_path() and get_ffprobe_path())

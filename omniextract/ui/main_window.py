@@ -95,11 +95,30 @@ class OmniExtractStudio(QWidget):
         self.cancel_requested = False
         self.batch_queue = []
         self.last_extracted_paths = []
-        self.current_metadata = {}
+        self.source_file = ""
+        self.save_dir = ""
+        self.frame_worker = None
+        self.clip_worker = None
+        self.motion_worker = None
+        self.gif_worker = None
+        self.interp_worker = None
+        self.conv_worker = None
+        self.multi_segment_worker = None
+        self.scene_worker = None
         self.initUI()
         self.load_settings()
 
         self.setAcceptDrops(True)
+
+    def selectSaveDirFromDrop(self, path):
+        """Handle folder drag and drop into save directory line edit."""
+        if not path:
+            return
+        directory = path if os.path.isdir(path) else os.path.dirname(path)
+        if os.path.isdir(directory):
+            self.save_dir = directory
+            self.save_dir_edit.setText(directory)
+            self.settings.setValue("last_output_dir", directory)
 
     def initUI(self):
         self.setWindowTitle(f"OmniExtract Studio v{__version__}")
@@ -1618,13 +1637,29 @@ class OmniExtractStudio(QWidget):
     def closeEvent(self, event):
         self.cancel_requested = True
         self.extracting = False
-        
-        for worker_attr in ("frame_worker", "clip_worker", "scene_worker", "scene_action_worker", "gif_worker", "motion_worker", "multi_segment_worker"):
-            worker = getattr(self, worker_attr, None)
-            if worker and worker.isRunning():
-                worker.cancel_requested = True
-                worker.wait(2000)
-                
+
+        workers = [
+            getattr(self, w, None)
+            for w in (
+                "frame_worker", "clip_worker", "scene_worker", "scene_action_worker",
+                "gif_worker", "motion_worker", "multi_segment_worker",
+                "interp_worker", "conv_worker"
+            )
+        ]
+        running = [w for w in workers if w and w.isRunning()]
+        for w in running:
+            if hasattr(w, "cancel"):
+                try:
+                    w.cancel()
+                except Exception:
+                    pass
+            else:
+                w.cancel_requested = True
+
+        for w in running:
+            if w.isRunning():
+                w.wait(250)
+
         self.save_settings()
         event.accept()
 
@@ -1846,10 +1881,27 @@ class OmniExtractStudio(QWidget):
     # Clip extraction
     # -----------------------------
 
-    def sync_clip_time_to_frame(self):
+    def _get_current_fps(self) -> float:
+        """Safely retrieve video FPS as float from metadata without raising ValueError."""
         if not self.current_metadata:
-            return
-        fps = float(self.current_metadata.get("FPS", 0))
+            return 0.0
+        fps = self.current_metadata.get("RawFPS") or self.current_metadata.get("Fps")
+        if isinstance(fps, (int, float)) and fps > 0:
+            return float(fps)
+        raw_val = self.current_metadata.get("FPS", "")
+        if isinstance(raw_val, (int, float)):
+            return float(raw_val) if raw_val > 0 else 0.0
+        if isinstance(raw_val, str):
+            cleaned = raw_val.replace("FPS", "").strip()
+            try:
+                val = float(cleaned)
+                return val if val > 0 else 0.0
+            except ValueError:
+                return 0.0
+        return 0.0
+
+    def sync_clip_time_to_frame(self):
+        fps = self._get_current_fps()
         if fps <= 0:
             return
 
@@ -1867,9 +1919,7 @@ class OmniExtractStudio(QWidget):
         self.clip_end_frame_spinbox.blockSignals(False)
 
     def sync_clip_frame_to_time(self):
-        if not self.current_metadata:
-            return
-        fps = float(self.current_metadata.get("FPS", 0))
+        fps = self._get_current_fps()
         if fps <= 0:
             return
 
@@ -3124,7 +3174,10 @@ class OmniExtractStudio(QWidget):
 
     def process_next_batch_item(self):
         # Clean up any leftover workers
-        for w_name in ["frame_worker", "clip_worker", "motion_worker", "animation_worker", "interp_worker", "conv_worker"]:
+        for w_name in [
+            "frame_worker", "clip_worker", "motion_worker", "gif_worker",
+            "interp_worker", "conv_worker", "multi_segment_worker", "scene_worker"
+        ]:
             worker = getattr(self, w_name, None)
             if worker is not None:
                 worker.deleteLater()
@@ -3184,77 +3237,64 @@ class OmniExtractStudio(QWidget):
                 
             self.extractClip()
             
-            if hasattr(self, "clip_worker") and self.clip_worker is not None:
-                def on_batch_clip_finished(success, cancelled, path, err, dur, has_aud, ff, src_aud):
-                    if not cancelled:
+            if getattr(self, "clip_worker", None) is not None:
+                def on_batch_clip_finished(success, cancelled, clip_p, err):
+                    if not cancelled and success:
                         self.batch_completed += 1
                         QTimer.singleShot(100, self.process_next_batch_item)
                     else:
                         self.in_batch_mode = False
-                
-                self.clip_worker.finished.disconnect()
-                self.clip_worker.finished.connect(
-                    lambda s, c, p, e, dur, has_aud, ff, src_aud: self._on_clip_extraction_finished(s, c, p, e, dur, has_aud, ff, src_aud)
-                )
                 self.clip_worker.finished.connect(on_batch_clip_finished)
                 
         elif "Motion" in mode:
             self.extractMotion()
-            if hasattr(self, "motion_worker") and self.motion_worker is not None:
-                def on_batch_motion_finished(extracted, cancelled):
-                    if not cancelled:
+            if getattr(self, "motion_worker", None) is not None:
+                def on_batch_motion_finished(success, count, msg):
+                    if success and not self.cancel_requested:
                         self.batch_completed += 1
                         QTimer.singleShot(100, self.process_next_batch_item)
                     else:
                         self.in_batch_mode = False
-                self.motion_worker.finished.disconnect()
-                self.motion_worker.finished.connect(self._on_motion_extraction_finished)
                 self.motion_worker.finished.connect(on_batch_motion_finished)
                 
         elif "GIF" in mode or "WebP" in mode:
             if state is None:
-                self.gif_start_time.setTime(QTime(0,0,0,0))
+                self.gif_start_time.setTime(QTime(0, 0, 0, 0))
                 if self.current_metadata:
                     ms = self.current_metadata.get("DurationMs", 0)
                     self.gif_end_time.setTime(ms_to_qtime(ms))
                 
             self.exportAnimation()
             
-            if hasattr(self, "animation_worker") and self.animation_worker is not None:
-                def on_batch_animation_finished(success, err, cancelled):
-                    if not cancelled:
+            if getattr(self, "gif_worker", None) is not None:
+                def on_batch_animation_finished(success, cancelled, out_p, msg):
+                    if not cancelled and success:
                         self.batch_completed += 1
                         QTimer.singleShot(100, self.process_next_batch_item)
                     else:
                         self.in_batch_mode = False
-                self.animation_worker.finished.disconnect()
-                self.animation_worker.finished.connect(self._on_animation_export_finished)
-                self.animation_worker.finished.connect(on_batch_animation_finished)
+                self.gif_worker.finished.connect(on_batch_animation_finished)
 
         elif "Framerate Conversion" in mode:
             self.startFramerateConversion()
-            if hasattr(self, "conv_worker") and self.conv_worker is not None:
+            if getattr(self, "conv_worker", None) is not None:
                 def on_batch_conv_finished(success, cancelled, path, err):
-                    if not cancelled:
+                    if not cancelled and success:
                         self.batch_completed += 1
                         QTimer.singleShot(100, self.process_next_batch_item)
                     else:
                         self.in_batch_mode = False
-                self.conv_worker.finished.disconnect()
-                self.conv_worker.finished.connect(self._on_conv_finished)
                 self.conv_worker.finished.connect(on_batch_conv_finished)
 
         elif "Interpolat" in mode:
             self.startInterpolation()
-            if hasattr(self, "interp_worker") and self.interp_worker is not None:
+            if getattr(self, "interp_worker", None) is not None:
                 def on_batch_interp_finished(success, cancelled, path, err):
-                    if not cancelled:
+                    if not cancelled and success:
                         self.batch_completed += 1
                         QTimer.singleShot(100, self.process_next_batch_item)
                     else:
                         self.in_batch_mode = False
-                self.interp_worker.finished.disconnect()
-                self.interp_worker.finished.connect(self._on_interpolation_finished)
                 self.interp_worker.finished.connect(on_batch_interp_finished)
 
         else:
@@ -3262,16 +3302,13 @@ class OmniExtractStudio(QWidget):
                 self.extract_part_checkbox.setChecked(False)
             self.extractFrames()
             
-            if hasattr(self, "frame_worker") and self.frame_worker is not None:
+            if getattr(self, "frame_worker", None) is not None:
                 def on_batch_frame_finished(extracted, elapsed, cancelled):
                     if not cancelled:
                         self.batch_completed += 1
                         QTimer.singleShot(100, self.process_next_batch_item)
                     else:
                         self.in_batch_mode = False
-                        
-                self.frame_worker.finished.disconnect()
-                self.frame_worker.finished.connect(self._on_frame_extraction_finished)
                 self.frame_worker.finished.connect(on_batch_frame_finished)
 
     # -----------------------------

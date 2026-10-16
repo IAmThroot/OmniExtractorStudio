@@ -39,15 +39,17 @@ class ClipExtractionWorker(QThread):
                             pass
 
                 if self.cancel_requested:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
+                    if process is not None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
                     break
 
-            process.communicate()
+            if process is not None:
+                process.communicate()
         except Exception as exc:
             ffmpeg_error = str(exc)
             if process is not None and process.poll() is None:
@@ -55,10 +57,20 @@ class ClipExtractionWorker(QThread):
                 process.wait()
 
         if self.cancel_requested:
+            if os.path.isfile(self.clip_path):
+                try:
+                    os.remove(self.clip_path)
+                except OSError:
+                    pass
             self.finished.emit(False, True, self.clip_path, "Cancelled")
             return
 
-        success = (process.returncode == 0 and os.path.isfile(self.clip_path) and os.path.getsize(self.clip_path) > 0)
+        success = (
+            process is not None
+            and process.returncode == 0
+            and os.path.isfile(self.clip_path)
+            and os.path.getsize(self.clip_path) > 0
+        )
         self.finished.emit(success, False, self.clip_path, ffmpeg_error)
 
 

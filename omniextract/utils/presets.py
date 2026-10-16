@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 
@@ -274,8 +275,10 @@ class PresetManager:
 
     def save_user_presets(self):
         try:
-            with open(self.preset_file, 'w', encoding='utf-8') as f:
+            temp_file = self.preset_file + ".tmp"
+            with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(self.user_presets, f, indent=4)
+            os.replace(temp_file, self.preset_file)
         except Exception as e:
             print(f"Failed to save presets: {e}")
 
@@ -286,8 +289,9 @@ class PresetManager:
 
     def get_preset(self, name):
         if name in BUILTIN_PRESETS:
-            return BUILTIN_PRESETS[name]
-        return self.user_presets.get(name)
+            return copy.deepcopy(BUILTIN_PRESETS[name])
+        val = self.user_presets.get(name)
+        return copy.deepcopy(val) if val is not None else None
 
     def is_builtin(self, name):
         return name in BUILTIN_PRESETS

@@ -19,8 +19,7 @@ def compute_video_hash(video_path: str) -> str:
         mtime = stat.st_mtime
         
         hasher = hashlib.sha256()
-        hasher.update(str(file_size).encode('utf-8'))
-        hasher.update(str(mtime).encode('utf-8'))
+        hasher.update(f"{file_size}:{mtime}:".encode('utf-8'))
         
         with open(video_path, 'rb') as f:
             # First 64KB
@@ -72,8 +71,11 @@ class AnalysisCache:
         if not self.cache_dir:
             return
         os.makedirs(self.cache_dir, exist_ok=True)
-        with open(os.path.join(self.cache_dir, filename), 'w', encoding='utf-8') as f:
+        target = os.path.join(self.cache_dir, filename)
+        temp_target = target + ".tmp"
+        with open(temp_target, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False)
+        os.replace(temp_target, target)
 
     def _load_json(self, filename: str):
         if not self.cache_dir:
@@ -88,21 +90,25 @@ class AnalysisCache:
             return None
 
     def save_metadata(self, metadata: dict):
-        """Save metadata containing the hash to validate cache."""
-        metadata['video_hash'] = self._hash
-        self._save_json('metadata.json', metadata)
+        """Save metadata containing the hash to validate cache without mutating caller dictionary."""
+        meta_copy = dict(metadata)
+        meta_copy['video_hash'] = self._hash
+        self._save_json('metadata.json', meta_copy)
 
     def load_metadata(self) -> Optional[dict]:
         """Load metadata."""
         return self._load_json('metadata.json')
         
     def save_waveform(self, data: bytes):
-        """Save raw waveform data."""
+        """Save raw waveform data atomically."""
         if not self.cache_dir:
             return
         os.makedirs(self.cache_dir, exist_ok=True)
-        with open(os.path.join(self.cache_dir, 'waveform.dat'), 'wb') as f:
+        target = os.path.join(self.cache_dir, 'waveform.dat')
+        temp_target = target + ".tmp"
+        with open(temp_target, 'wb') as f:
             f.write(data)
+        os.replace(temp_target, target)
 
     def load_waveform(self) -> Optional[bytes]:
         """Load raw waveform data."""

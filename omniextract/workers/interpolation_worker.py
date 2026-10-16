@@ -252,17 +252,39 @@ class InterpolationWorker(QThread):
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
         codec_args = self._resolve_codec_args()
 
+        # Determine multiplier and recursion depth from target vs source FPS
+        src_fps = max(1.0, float(self.source_fps))
+        ratio = self.target_fps / src_fps
+
+        if ratio <= 1.05:
+            multiplier = 1
+            depth = 0
+        elif ratio <= 2.1:
+            multiplier = 2
+            depth = 1
+        elif ratio <= 4.2:
+            multiplier = 4
+            depth = 2
+        else:
+            multiplier = 8
+            depth = 3
+
+        pipe_fps = src_fps * multiplier
+
         # Pipe raw RGB/BGR frames to FFmpeg encoder
         enc_cmd = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s", f"{width}x{height}",
-            "-r", f"{self.target_fps:.4f}",
+            "-r", f"{pipe_fps:.4f}",
             "-i", "pipe:0",
         ]
 
         if self.audio_mode != "mute":
             enc_cmd.extend(["-i", self.source_file, "-map", "0:v", "-map", "1:a?", "-c:a", "copy"])
+
+        if abs(pipe_fps - self.target_fps) > 0.01:
+            enc_cmd.extend(["-vf", f"fps=fps={self.target_fps:.4f}"])
 
         enc_cmd.extend(codec_args)
         enc_cmd.append(self.output_path)
@@ -279,6 +301,16 @@ class InterpolationWorker(QThread):
             self.finished.emit(False, False, "", f"Failed to launch FFmpeg encoder: {exc}")
             return
 
+        def interpolate_recursive(f0, f1, d):
+            if d <= 0 or self.cancel_requested:
+                return []
+            mid = interpolator.interpolate_pair(f0, f1)
+            if d == 1:
+                return [mid]
+            left = interpolate_recursive(f0, mid, d - 1)
+            right = interpolate_recursive(mid, f1, d - 1)
+            return left + [mid] + right
+
         # Start multi-threaded reader and writer to overlap I/O with GPU inference
         in_q = queue.Queue(maxsize=10)
         out_q = queue.Queue(maxsize=10)
@@ -288,48 +320,96 @@ class InterpolationWorker(QThread):
                 r, f = cap.read()
                 if not r or f is None:
                     break
-                in_q.put(f)
-            in_q.put(None)
+                try:
+                    in_q.put(f, timeout=0.2)
+                except queue.Full:
+                    continue
+            try:
+                in_q.put(None, timeout=1.0)
+            except Exception:
+                pass
             cap.release()
 
         def writer():
             while not self.cancel_requested:
-                item = out_q.get()
+                try:
+                    item = out_q.get(timeout=0.2)
+                except queue.Empty:
+                    continue
                 if item is None:
                     break
                 try:
-                    self.process.stdin.write(item)
+                    if self.process and self.process.stdin:
+                        self.process.stdin.write(item)
                 except Exception:
                     break
 
-        threading.Thread(target=reader, daemon=True).start()
-        threading.Thread(target=writer, daemon=True).start()
+        r_thread = threading.Thread(target=reader, daemon=True)
+        w_thread = threading.Thread(target=writer, daemon=True)
+        r_thread.start()
+        w_thread.start()
 
-        prev_frame = in_q.get()
+        prev_frame = None
+        while not self.cancel_requested:
+            try:
+                prev_frame = in_q.get(timeout=0.5)
+                break
+            except queue.Empty:
+                if not r_thread.is_alive():
+                    break
+
         if prev_frame is None:
             self._kill_process()
             self.finished.emit(False, False, "", "Could not read initial video frame.")
-            out_q.put(None)
+            try:
+                out_q.put(None, timeout=0.5)
+            except Exception:
+                pass
             return
 
         # Write first frame
-        out_q.put(prev_frame.tobytes())
+        try:
+            out_q.put(prev_frame.tobytes(), timeout=1.0)
+        except Exception:
+            pass
 
         frame_idx = 1
         ffmpeg_error = ""
 
         try:
             while not self.cancel_requested:
-                curr_frame = in_q.get()
-                if curr_frame is None:
+                curr_frame = None
+                while not self.cancel_requested:
+                    try:
+                        curr_frame = in_q.get(timeout=0.2)
+                        break
+                    except queue.Empty:
+                        if not r_thread.is_alive():
+                            break
+
+                if curr_frame is None or self.cancel_requested:
                     break
 
-                # Generate intermediate frame
-                mid_frame = interpolator.interpolate_pair(prev_frame, curr_frame)
+                # Generate intermediate frames according to recursion depth
+                intermediates = interpolate_recursive(prev_frame, curr_frame, depth)
 
-                # Write intermediate frame and current frame
-                out_q.put(mid_frame.tobytes())
-                out_q.put(curr_frame.tobytes())
+                # Write intermediate frames and current frame
+                for intermediate in intermediates:
+                    if self.cancel_requested:
+                        break
+                    while not self.cancel_requested:
+                        try:
+                            out_q.put(intermediate.tobytes(), timeout=0.2)
+                            break
+                        except queue.Full:
+                            pass
+
+                while not self.cancel_requested:
+                    try:
+                        out_q.put(curr_frame.tobytes(), timeout=0.2)
+                        break
+                    except queue.Full:
+                        pass
 
                 prev_frame = curr_frame
                 frame_idx += 1
@@ -347,13 +427,19 @@ class InterpolationWorker(QThread):
                 pct = int(min(99, frame_idx * 100 / total_frames))
                 self.progress.emit(
                     pct,
-                    f"AI RIFE [{dev_label}]: Frame {frame_idx}/{total_frames} ({pct}%)"
+                    f"AI RIFE [{dev_label}] ({multiplier}x): Frame {frame_idx}/{total_frames} ({pct}%)"
                 )
 
         except Exception as exc:
             ffmpeg_error = str(exc)
 
-        out_q.put(None)
+        try:
+            out_q.put(None, timeout=1.0)
+        except Exception:
+            pass
+
+        w_thread.join(timeout=1.0)
+        r_thread.join(timeout=1.0)
 
         try:
             if self.process.stdin:

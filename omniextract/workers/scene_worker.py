@@ -162,6 +162,11 @@ class SceneActionWorker(QThread):
 
     def _extract_keyframes(self):
         cap = cv2.VideoCapture(self.source_file)
+        if not self.scenes:
+            cap.release()
+            self.finished.emit(False, "No scenes provided for keyframe extraction.")
+            return
+
         used_names = set()
 
         for i, frame_num in enumerate(self.scenes):
@@ -180,7 +185,10 @@ class SceneActionWorker(QThread):
             self.progress.emit(pct, f"Extracted scene keyframe {i+1} of {len(self.scenes)}")
 
         cap.release()
-        self.finished.emit(True, "Keyframes extracted successfully.")
+        if self.cancel_requested:
+            self.finished.emit(False, "Keyframe extraction cancelled.")
+        else:
+            self.finished.emit(True, "Keyframes extracted successfully.")
 
     def _split_clips(self):
         ffmpeg = shutil.which("ffmpeg")
@@ -188,20 +196,33 @@ class SceneActionWorker(QThread):
             self.finished.emit(False, "FFmpeg not found.")
             return
 
+        if not self.fps or self.fps <= 0:
+            self.finished.emit(False, "Invalid video framerate for scene splitting.")
+            return
+
         scenes_ms = [round((f / self.fps) * 1000) for f in self.scenes]
         duration_ms = round((self.frame_count / self.fps) * 1000)
         scenes_ms.append(duration_ms)
 
-        if scenes_ms[0] > 0:
+        if not scenes_ms or scenes_ms[0] > 0:
             scenes_ms.insert(0, 0)
 
+        cuts = sorted(list(set(scenes_ms)))
+        total_clips = len(cuts) - 1
+        if total_clips <= 0:
+            self.finished.emit(False, "No scene cuts found to split.")
+            return
+
         used_names = set()
-        for i in range(len(scenes_ms) - 1):
+        split_count = 0
+        errors = []
+
+        for i in range(total_clips):
             if self.cancel_requested:
                 break
 
-            start_ms = scenes_ms[i]
-            end_ms = scenes_ms[i + 1]
+            start_ms = cuts[i]
+            end_ms = cuts[i + 1]
             if end_ms <= start_ms:
                 continue
 
@@ -217,8 +238,23 @@ class SceneActionWorker(QThread):
                 "-t", f"{dur_sec:.6f}", "-c:v", "copy", "-c:a", "copy",
                 "-avoid_negative_ts", "make_zero", out_path
             ]
-            subprocess.run(cmd, capture_output=True)
-            pct = int((i + 1) / (len(scenes_ms) - 1) * 100)
-            self.progress.emit(pct, f"Extracted clip {i+1} of {len(scenes_ms)-1}")
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+                split_count += 1
+            else:
+                err_msg = res.stderr.strip() if res.stderr else "Unknown FFmpeg error"
+                errors.append(f"Clip {i+1}: {err_msg}")
 
-        self.finished.emit(True, "Clips split successfully.")
+            pct = int((i + 1) / total_clips * 100)
+            self.progress.emit(pct, f"Extracted clip {i+1} of {total_clips}")
+
+        if self.cancel_requested:
+            self.finished.emit(False, "Scene splitting cancelled.")
+            return
+
+        if split_count == 0 and errors:
+            self.finished.emit(False, f"Failed to split clips: {errors[0]}")
+        elif errors:
+            self.finished.emit(True, f"Extracted {split_count} clips with {len(errors)} warnings.")
+        else:
+            self.finished.emit(True, f"Successfully split {split_count} clips.")

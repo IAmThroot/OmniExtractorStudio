@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-10-08
+## [1.2.0] - 2026-10-16
 
 ### Added
 - **FPS & Interpolation Tab with Dedicated Sub-Tabs**: Separated "Framerate Conversion" and "Frame Interpolation" into distinct sub-tab workflows for clear separation of concerns.
@@ -15,19 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Playback Speed Conform (`setpts`) to change playback speed and interpretation (e.g. 60 FPS footage played back at 24 FPS for 0.4x slow motion) without dropping or duplicating frames.
 - **Frame Interpolation Sub-Tab**:
   - **Motion-Compensated Interpolation (MCI)**: Zero-dependency FFmpeg `minterpolate` filter supporting Adaptive Overlapped Block Motion Compensation (`aobmc`), bidirectional motion estimation, search algorithms (`epzs`, `hexbs`, `esa`), and scene cut guard (`scd=fdiff`).
-  - **Optional AI Neural Interpolation (RIFE ONNX)**: Model manager auto-detecting `RIFE_fp32.onnx` (downloadable from Hugging Face `FuryTMP/RIFE_fp32`) or custom weights in `assets/models/`, running via the lightweight ONNX Runtime with zero PyTorch dependencies.
+  - **Ratio-Aware AI Neural Interpolation (RIFE ONNX)**: Model manager auto-detecting `RIFE_fp32.onnx` (downloadable from Hugging Face `FuryTMP/RIFE_fp32`) or custom ONNX models in `assets/models/`, running via the lightweight ONNX Runtime with zero PyTorch dependencies.
+  - **Recursive Multi-Multiplier Cadence**: Dynamically derives target-to-source multiplier (1x, 2x, 4x, 8x) and generates true recursive intermediate frames with exact pipe framerate and resampling filter.
 - **Source Video Properties Display**: Fixed source FPS detection to reliably probe stream and container frame rates across MP4, MKV, and WebM containers.
 - **Target FPS Presets**: Quick-select rates (24, 25, 29.97, 30, 50, 59.94, 60, 120 FPS, 0.5x, 2x, 4x) and custom floating-point spinboxes.
 - **Hardware-Accelerated Encoding**: Integrated NVENC, QSV, and VAAPI encoder selection via `hwaccel.py`.
 - **Preset Profile & Batch Queue Integration**: Save and load both conversion and interpolation configurations within Presets, with distinct Batch Queue job creation for Framerate Conversion and Frame Interpolation.
-- **Interpolation Pipeline Performance & Multi-Threading**:
-  - Implemented multi-threaded Producer-Consumer queuing (`queue.Queue`) in the RIFE pipeline to decouple OpenCV frame reading, GPU inference, and FFmpeg output encoding.
-  - Added `-threads 0` and `-filter_threads 0` to FFmpeg MCI pipelines to unlock multi-core utilization.
-  - Optimized numpy tensor formatting and BGR/RGB operations in `rife.py` via native OpenCV operations.
-  - Added active device and Execution Provider diagnostics to the UI, explicitly alerting users when running on CPU vs CUDA GPU.
-  - Resolved dynamic link failure on modern Linux distributions running NVIDIA cuDNN 9+ by automatically preloading modular shared libraries (`libcudnn_ops`, `libcudnn_cnn`, `libcudnn_adv`, `libcudnn`) into the global symbol table with `RTLD_GLOBAL`.
-  - Muted non-critical ONNX Runtime C++ engine logger warnings (`conv.cc Fallback mode`) while preserving critical error reporting.
-  - Accelerated YOLO presence detection preprocessing with OpenCV C++ `cv2.dnn.blobFromImage`.
+
+### Fixed & Optimized
+- **Batch Queue Orchestration**: Fixed worker attribute references (`gif_worker`, `motion_worker`), signal parameter signatures, and cleanup lists (`multi_segment_worker`, `scene_worker`), eliminating `AttributeError` exceptions and allowing batch queues to advance automatically without dropping error handlers.
+- **Strict AI Validation**: Eliminated silent `cv2.addWeighted` fallbacks on `.pkl` and `.safetensors` checkpoints; now explicitly warns users when a raw weights file lacks an exported ONNX model graph.
+- **Scene and Clip Extraction Robustness**: Guarded against `ZeroDivisionError` when scene cut lists are empty; added strict subprocess return code and output file validation to prevent false-success reporting on failed FFmpeg calls.
+- **Subprocess & Deadlock Prevention**: Switched animated export worker to file-backed error streams, preventing 64KB OS pipe buffer deadlocks during long exports; added proper `cancel()` routines across all background workers.
+- **Vectorized Audio Waveform Processing**: Optimized audio analysis with NumPy `frombuffer` and array vectorization; progressive extraction now decodes the audio stream once rather than decoding 3 sequential times.
+- **Metadata & Safe State Initialization**: Added safe fallback parsing for non-numeric FPS metadata strings (`"Unknown"`) preventing clip time/frame synchronization crashes; properly initialized `source_file` and `save_dir` attributes with drag-and-drop directory support.
+- **Cache & Preset Atomic Writes**: Replaced in-place writes in `analysis_cache` and `preset_manager` with atomic temporary file replacements (`.tmp` + `os.replace`), protecting user configs from corruption during unexpected shutdowns.
+- **Linux cuDNN 9+ Dynamic Loading**: Preloaded modular cuDNN 9 shared libraries (`libcudnn_ops`, `libcudnn_cnn`, `libcudnn_adv`, `libcudnn`) with `RTLD_GLOBAL` on Linux to restore CUDA acceleration on cutting-edge distributions.
+- **Headless CI Testing**: Configured `QT_QPA_PLATFORM=offscreen` and headless Qt core fixtures, ensuring reliable headless test execution in GitHub Actions CI across Linux and Windows runners.
 
 ## [1.1.0] - 2026-09-01
 

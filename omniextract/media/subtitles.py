@@ -103,7 +103,8 @@ def extract_subtitles_to_temp(source_video, sub_index):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg or not source_video or not os.path.isfile(source_video):
         return ""
-    temp_srt = os.path.join(tempfile.gettempdir(), f"omni_sub_{os.getpid()}_{sub_index}.srt")
+    with tempfile.NamedTemporaryFile(suffix=".srt", delete=False) as f:
+        temp_srt = f.name
     cmd = [
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-i", source_video, "-map", f"0:s:{sub_index}",
@@ -115,6 +116,11 @@ def extract_subtitles_to_temp(source_video, sub_index):
             return temp_srt
     except Exception:
         pass
+    if os.path.isfile(temp_srt):
+        try:
+            os.remove(temp_srt)
+        except OSError:
+            pass
     return ""
 
 
@@ -143,11 +149,10 @@ def write_shifted_srt(subtitles_list, start_ms, end_ms):
     if not filtered:
         return ""
 
-    temp_srt = os.path.join(tempfile.gettempdir(), f"omni_shifted_{os.getpid()}_{int(time.time()*1000)}.srt")
     try:
-        with open(temp_srt, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".srt", delete=False, encoding="utf-8") as f:
             f.write("\n".join(filtered) + "\n")
-        return temp_srt
+            return f.name
     except Exception:
         return ""
 

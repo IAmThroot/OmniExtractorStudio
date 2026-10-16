@@ -114,13 +114,24 @@ class AnimatedExportWorker(QThread):
 
         self._run_ffmpeg_with_progress(cmd, duration_ms, 5)
 
+    def cancel(self):
+        self.cancel_requested = True
+        if self.process is not None:
+            try:
+                self.process.terminate()
+            except Exception:
+                pass
+
     def _run_ffmpeg_with_progress(self, cmd, duration_ms, base_pct):
+        import tempfile
+        stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
         try:
             self.process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cmd, stdout=subprocess.PIPE, stderr=stderr_file,
                 text=True, bufsize=1
             )
         except Exception as e:
+            stderr_file.close()
             self.finished.emit(False, False, "", str(e))
             return
 
@@ -143,11 +154,24 @@ class AnimatedExportWorker(QThread):
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self.process.kill()
+                    self.process.wait()
+                stderr_file.close()
+                if os.path.isfile(self.output_path):
+                    try:
+                        os.remove(self.output_path)
+                    except OSError:
+                        pass
                 self.finished.emit(False, True, "", "Cancelled")
                 return
 
         self.process.wait()
-        stderr_output = self.process.stderr.read()
+        try:
+            stderr_file.seek(0)
+            stderr_output = stderr_file.read().strip()
+        except Exception:
+            stderr_output = ""
+        finally:
+            stderr_file.close()
 
         if self.process.returncode == 0 and os.path.isfile(self.output_path) and os.path.getsize(self.output_path) > 0:
             size_kb = os.path.getsize(self.output_path) / 1024

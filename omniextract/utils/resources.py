@@ -1,7 +1,9 @@
+import functools
 import os
 import sys
 
 
+@functools.lru_cache(maxsize=128)
 def get_resource_path(relative_path):
     """Resolve file path for development or PyInstaller standalone packaging."""
     if hasattr(sys, "_MEIPASS"):

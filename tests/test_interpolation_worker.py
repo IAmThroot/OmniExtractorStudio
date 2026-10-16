@@ -100,6 +100,25 @@ class TestInterpolationWorker(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("No AI model found", text)
 
+    def test_rife_checkpoint_not_ready(self):
+        import tempfile
+        from omniextract.ai.rife import get_model_status_info, RIFEInterpolator
+        with tempfile.NamedTemporaryFile(suffix=".pkl") as f:
+            text, ready, path = get_model_status_info(f.name)
+            self.assertFalse(ready)
+            self.assertIn("raw weights checkpoint", text)
+            self.assertIn("ONNX", text)
+            with self.assertRaises(NotImplementedError):
+                RIFEInterpolator(f.name)
+
+        with tempfile.NamedTemporaryFile(suffix=".safetensors") as f:
+            text, ready, path = get_model_status_info(f.name)
+            self.assertFalse(ready)
+            self.assertIn("SafeTensors weights checkpoint", text)
+            self.assertIn("ONNX", text)
+            with self.assertRaises(NotImplementedError):
+                RIFEInterpolator(f.name)
+
 
 if __name__ == "__main__":
     unittest.main()
