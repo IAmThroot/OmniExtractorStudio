@@ -247,6 +247,16 @@ Generate brand new in-between frames for super-smooth playback or slow motion:
         <img src="assets/screenshots/preview_window.png" width="100%" alt="Video Preview">
       </td>
     </tr>
+    <tr>
+      <td align="center" width="50%">
+        <b>FPS & Frame Interpolation (MCI & RIFE AI)</b><br>
+        <img src="assets/screenshots/fps_interpolation.png" width="100%" alt="FPS & Frame Interpolation">
+      </td>
+      <td align="center" width="50%">
+        <b>Clip Cutting & Multi-Segment Trimming</b><br>
+        <img src="assets/screenshots/clip_cutting.png" width="100%" alt="Clip Cutting">
+      </td>
+    </tr>
   </table>
   <br>
   <img src="assets/screenshots/feature_preview.png" width="90%" alt="Playback Timeline Preview">

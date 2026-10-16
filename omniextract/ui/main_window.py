@@ -100,6 +100,7 @@ class OmniExtractStudio(QWidget):
         self.last_extracted_paths = []
         self.source_file = ""
         self.save_dir = ""
+        self.current_metadata = None
         self.frame_worker = None
         self.clip_worker = None
         self.motion_worker = None
