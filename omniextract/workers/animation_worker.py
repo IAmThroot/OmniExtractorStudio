@@ -164,7 +164,11 @@ class AnimatedExportWorker(QThread):
                 self.finished.emit(False, True, "", "Cancelled")
                 return
 
-        self.process.wait()
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
         try:
             stderr_file.seek(0)
             stderr_output = stderr_file.read().strip()

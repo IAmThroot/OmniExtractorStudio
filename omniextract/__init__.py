@@ -3,7 +3,7 @@ OmniExtract Studio
 All-in-one desktop video processing and dataset creation studio.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = "Throot"
 
 # On Linux, NVIDIA cuDNN 9+ separates functions across modular shared objects

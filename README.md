@@ -1,6 +1,6 @@
 <div align="center">
   <img src="assets/screenshots/hero_icon.png" width="128" height="128" alt="OmniExtract Studio Logo">
-  <h1>OmniExtract Studio v1.2.0</h1>
+  <h1>OmniExtract Studio v1.3.0</h1>
   <p><b>An all-in-one desktop application designed for high-precision video processing, frame extraction, intelligent motion tracking, and more.</b></p>
   
   [![GitHub Release](https://img.shields.io/github/v/release/IAmThroot/OmniExtractorStudio)](https://github.com/IAmThroot/OmniExtractorStudio/releases)

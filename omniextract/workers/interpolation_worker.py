@@ -6,7 +6,7 @@ from typing import Optional, List
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..utils.timestamps import format_timestamp
-from ..media.hwaccel import probe_capabilities, get_hwaccel_encode_args
+from ..media.hwaccel import probe_capabilities, get_hwaccel_encode_profile
 from ..ai.rife import find_rife_model, is_rife_available, get_model_status_info, RIFEInterpolator
 
 
@@ -116,27 +116,15 @@ class InterpolationWorker(QThread):
 
     def _resolve_codec_args(self) -> List[str]:
         """Resolve video codec and quality arguments with optional hardware acceleration."""
+        codec = "hevc" if self.video_codec in ("libx265", "hevc") else "h264"
         if self.hwaccel_enabled:
             caps = probe_capabilities()
-            if self.video_codec in ("libx265", "hevc"):
-                hw_args = get_hwaccel_encode_args(caps, codec="hevc")
-            else:
-                hw_args = get_hwaccel_encode_args(caps, codec="h264")
-            if hw_args:
-                # E.g. ['-c:v', 'h264_nvenc']
-                encoder = hw_args[1] if len(hw_args) > 1 else ""
-                if "nvenc" in encoder:
-                    return hw_args + ["-cq", str(self.quality_crf), "-preset", "p4", "-pix_fmt", "yuv420p"]
-                elif "qsv" in encoder:
-                    return hw_args + ["-global_quality", str(self.quality_crf), "-pix_fmt", "nv12"]
-                elif "vaapi" in encoder:
-                    return hw_args + ["-qp", str(self.quality_crf)]
-                return hw_args + ["-pix_fmt", "yuv420p"]
+            return get_hwaccel_encode_profile(caps, codec=codec, quality_crf=self.quality_crf, preset="medium")
 
         # Software encoder fallback
-        codec = "libx265" if self.video_codec in ("libx265", "hevc") else "libx264"
+        sw_codec = "libx265" if codec == "hevc" else "libx264"
         return [
-            "-c:v", codec,
+            "-c:v", sw_codec,
             "-crf", str(self.quality_crf),
             "-preset", "medium",
             "-pix_fmt", "yuv420p"
@@ -197,7 +185,7 @@ class InterpolationWorker(QThread):
                         except (ValueError, ZeroDivisionError):
                             pass
 
-            _, stderr_data = self.process.communicate()
+            _, stderr_data = self.process.communicate(timeout=15)
             if stderr_data:
                 ffmpeg_error = stderr_data.strip()
 

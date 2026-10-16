@@ -9,7 +9,10 @@ import shutil
 from typing import Optional, Union, List
 
 def compute_video_hash(video_path: str) -> str:
-    """Compute a fast content-based hash combining file size, mtime, and 64KB start/end."""
+    """
+    Compute a fast, robust content-based hash combining file size, mtime,
+    and distributed block samples (0%, 25%, 50%, 75%, 100%).
+    """
     if not os.path.exists(video_path):
         return ""
     
@@ -21,14 +24,22 @@ def compute_video_hash(video_path: str) -> str:
         hasher = hashlib.sha256()
         hasher.update(f"{file_size}:{mtime}:".encode('utf-8'))
         
+        block_size = 65536  # 64 KB
+        
         with open(video_path, 'rb') as f:
-            # First 64KB
-            hasher.update(f.read(65536))
-            
-            # Last 64KB
-            if file_size > 65536:
-                f.seek(-min(65536, file_size), os.SEEK_END)
+            if file_size <= block_size * 5:
                 hasher.update(f.read())
+            else:
+                checkpoints = [
+                    0,
+                    int(file_size * 0.25),
+                    int(file_size * 0.50),
+                    int(file_size * 0.75),
+                    max(0, file_size - block_size),
+                ]
+                for offset in checkpoints:
+                    f.seek(offset)
+                    hasher.update(f.read(block_size))
                 
         return hasher.hexdigest()
     except (OSError, IOError):

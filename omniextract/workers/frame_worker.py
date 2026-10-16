@@ -54,11 +54,25 @@ class FrameExtractionWorker(QThread):
 
         encode_params = []
         if self.image_format == "JPEG":
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.quality]
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, int(self.quality)]
         elif self.image_format == "PNG":
-            encode_params = [cv2.IMWRITE_PNG_COMPRESSION, self.quality]
+            # Map 0-100 UI quality to 0-9 libpng compression level (inverted: 100 quality -> level 0, 0 quality -> level 9)
+            png_level = max(0, min(9, int((100 - self.quality) * 9 / 100)))
+            encode_params = [cv2.IMWRITE_PNG_COMPRESSION, png_level]
 
-        manifest_data = []
+        manifest_file = None
+        manifest_writer = None
+        if self.export_manifest:
+            csv_path = os.path.join(self.save_dir, "extraction_manifest.csv")
+            try:
+                manifest_file = open(csv_path, 'w', newline='', encoding='utf-8')
+                manifest_writer = csv.DictWriter(
+                    manifest_file,
+                    fieldnames=["frame_number", "timestamp_ms", "formatted_time", "filename"]
+                )
+                manifest_writer.writeheader()
+            except Exception as e:
+                self.error.emit(f"Could not open manifest: {e}")
 
         import os
         workers = (os.cpu_count() or 4)
@@ -106,7 +120,14 @@ class FrameExtractionWorker(QThread):
 
                 if self.filter_blur:
                     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-                    variance = cv2.Laplacian(gray, cv2.CV_64F).var()
+                    h, w = gray.shape[:2]
+                    max_dim = max(h, w)
+                    if max_dim > 720:
+                        scale = 720.0 / max_dim
+                        small_gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                    else:
+                        small_gray = gray
+                    variance = cv2.Laplacian(small_gray, cv2.CV_32F).var()
                     if variance < self.blur_threshold:
                         skipped += 1
                         current_frame += self.step
@@ -127,13 +148,16 @@ class FrameExtractionWorker(QThread):
                 filename = self.render_filename_cb(actual_frame, timestamp_ms, self.extension)
                 path = self.unique_path_cb(self.save_dir, filename, used_names)
 
-                if self.export_manifest:
-                    manifest_data.append({
-                        "frame_number": actual_frame,
-                        "timestamp_ms": timestamp_ms,
-                        "formatted_time": format_timestamp(timestamp_ms),
-                        "filename": os.path.basename(path)
-                    })
+                if manifest_writer:
+                    try:
+                        manifest_writer.writerow({
+                            "frame_number": actual_frame,
+                            "timestamp_ms": timestamp_ms,
+                            "formatted_time": format_timestamp(timestamp_ms),
+                            "filename": os.path.basename(path)
+                        })
+                    except Exception:
+                        pass
 
                 sem.acquire()
                 executor.submit(_write_task, path, image)
@@ -157,14 +181,11 @@ class FrameExtractionWorker(QThread):
 
         cap.release()
 
-        if self.export_manifest and manifest_data and not self.cancel_requested:
-            csv_path = os.path.join(self.save_dir, "extraction_manifest.csv")
+        if manifest_file:
             try:
-                with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=["frame_number", "timestamp_ms", "formatted_time", "filename"])
-                    writer.writeheader()
-                    writer.writerows(manifest_data)
-            except Exception as e:
-                self.error.emit(f"Could not save manifest: {e}")
+                manifest_file.flush()
+                manifest_file.close()
+            except Exception:
+                pass
 
         self.finished.emit(extracted, time.time() - start_clock, self.cancel_requested)

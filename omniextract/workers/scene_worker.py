@@ -232,13 +232,23 @@ class SceneActionWorker(QThread):
             ext = self.extension.lstrip(".")
             out_path = self.path_cb(self.save_dir, f"scene_{i+1}_clip.{ext}", used_names)
 
+            from ..media.hwaccel import probe_capabilities, get_hwaccel_encode_profile
+            caps = probe_capabilities()
+            encode_args = get_hwaccel_encode_profile(caps, codec='h264', quality_crf=18, preset='fast')
+
             cmd = [
                 ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                 "-ss", f"{start_sec:.6f}", "-i", self.source_file,
-                "-t", f"{dur_sec:.6f}", "-c:v", "copy", "-c:a", "copy",
+                "-t", f"{dur_sec:.6f}"
+            ] + encode_args + [
+                "-c:a", "copy",
                 "-avoid_negative_ts", "make_zero", out_path
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True)
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                errors.append(f"Clip {i+1}: Extraction timed out.")
+                continue
             if res.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
                 split_count += 1
             else:

@@ -50,3 +50,13 @@ def test_get_hwaccel_encode_args():
     caps = HardwareCapabilities([], ['h264_nvenc'], [])
     args_nvenc = get_hwaccel_encode_args(caps)
     assert args_nvenc == ['-c:v', 'h264_nvenc']
+
+def test_get_hwaccel_encode_profile():
+    from omniextract.media.hwaccel import get_hwaccel_encode_profile
+    profile = get_hwaccel_encode_profile(preset="fast", crf=18)
+    assert isinstance(profile, list)
+    assert "-c:v" in profile
+    assert profile.codec in profile
+    assert profile.get("video_args") == list(profile)
+
+

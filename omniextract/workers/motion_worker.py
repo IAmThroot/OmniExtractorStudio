@@ -4,6 +4,7 @@ import subprocess
 import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from ..media.hwaccel import get_hwaccel_encode_profile
 from ..utils.resources import get_resource_path
 from ..utils.timestamps import format_timestamp
 
@@ -26,6 +27,9 @@ class MotionExtractionWorker(QThread):
         self.engine = engine
         self.yolo_conf = yolo_conf
         self.cancel_requested = False
+
+    def cancel(self):
+        self.cancel_requested = True
 
     def run(self):
         cap = cv2.VideoCapture(self.source_file)
@@ -66,14 +70,21 @@ class MotionExtractionWorker(QThread):
         area_scale = (320 * 180) / (W * H)
         scaled_min_area = self.min_area * area_scale
 
+        stride = max(1, round(fps / 5)) if is_yolo else 1
+        last_yolo_motion = False
+
         while not self.cancel_requested:
             current_ms = round((current_frame / fps) * 1000)
             
             motion_detected = False
             
             if is_yolo:
-                # Delegate to extracted YOLO presence detector
-                motion_detected = yolo_detector.detect_presence(frame, self.yolo_conf)
+                # Temporal stride: sample YOLO inference ~5 times/sec instead of every frame
+                if current_frame % stride == 0:
+                    motion_detected = yolo_detector.detect_presence(frame, self.yolo_conf)
+                    last_yolo_motion = motion_detected
+                else:
+                    motion_detected = last_yolo_motion
             else:
                 # MOG2 Logic
                 small = cv2.resize(frame, (320, 180))
@@ -137,6 +148,8 @@ class MotionExtractionWorker(QThread):
                 return
 
             self.progress.emit(100, "Extracting clips...")
+            profile = get_hwaccel_encode_profile(preset="fast", crf=18)
+            enc_args = profile.get("video_args", ["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
 
             for i, (start_ms, end_ms) in enumerate(motion_intervals):
                 if self.cancel_requested:
@@ -152,11 +165,14 @@ class MotionExtractionWorker(QThread):
                 cmd = [
                     ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                     "-ss", f"{start_sec:.6f}", "-i", self.source_file,
-                    "-t", f"{dur_sec:.6f}", "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "copy",
+                    "-t", f"{dur_sec:.6f}", *enc_args, "-c:a", "copy",
                     "-avoid_negative_ts", "make_zero", out_path
                 ]
 
-                subprocess.run(cmd, capture_output=True)
+                try:
+                    subprocess.run(cmd, capture_output=True, timeout=120)
+                except subprocess.TimeoutExpired:
+                    pass
 
         if yolo_detector:
             yolo_detector.close()

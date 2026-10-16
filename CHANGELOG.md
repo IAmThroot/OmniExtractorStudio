@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-16
+
+### Added & Optimized
+- **Asynchronous Video Metadata & Subtitle Probing**: Integrated background `MetadataProbeWorker` to offload ffprobe calls from the main UI thread, eliminating GUI freezes when opening large or network-stored videos.
+- **Hardware Acceleration Encoder Profiles**: Added `get_hwaccel_encode_profile()` with unified rate-control flags across NVIDIA NVENC (`-cq`), Intel QSV (`-global_quality`), VAAPI (`-qp`), and CPU (`-crf`). Wired hardware encoding into Clip extraction, Multi-Segment cuts, Scene splitting, and Motion clip extraction.
+- **Accurate Scene Splitting**: Replaced keyframe-snapped copy cuts (`-ss` before `-i`) with re-encoded hardware-accelerated cuts, ensuring frame-accurate cuts strictly on detected scene boundaries.
+- **YOLO Temporal Stride Optimization**: Sampled YOLO presence detection at ~5 FPS intervals instead of full-frame inference on 30/60 FPS streams, yielding a 6x to 12x speedup in AI motion detection.
+- **Subprocess Hang Protection & Bounded Timeouts**: Added strict timeouts (`timeout=15`–`120s`) and fallback process termination across `communicate()` and `wait()` calls in `AnimationExportWorker`, `ClipExtractionWorker`, `MultiSegmentWorker`, `InterpolationWorker`, and `VideoPreviewDialog`.
+- **Direct Thumbnail Decoding & OOM Prevention**: Refactored `ContactSheetDialog` to decode images directly at target thumbnail resolution via `QImageReader.setScaledSize()`, cutting memory usage by over 95% on 4K/8K media and paginating display view to prevent UI stalls.
+- **$O(\log N)$ Binary Subtitle Search**: Optimized subtitle overlay synchronization during video preview playback using binary search (`bisect_right`) with bounding cue duration windows.
+- **Multi-Block Video Cache Hashing**: Replaced 128KB head/tail sampling in `analysis_cache` with distributed multi-block sampling (0%, 25%, 50%, 75%, 100%) to prevent collision on edited video files.
+- **Corrected PNG Quality Inversion**: Fixed PNG compression scale mapping so that 0–100 quality maps properly to libpng's 0–9 compression range (`IMWRITE_PNG_COMPRESSION`).
+- **Downscaled Blur Detection & Streaming Manifest**: Frame extraction now downscales Laplacian blur detection images to $\le 720\text{p}$ in float32 (saving ~66MB per 4K frame) and streams CSV manifests directly to disk with periodic flushing.
+
 ## [1.2.0] - 2026-10-16
 
 ### Added

@@ -10,3 +10,10 @@ def test_format_file_size():
 def test_probe_nonexistent_video():
     data = probe_video_metadata("/nonexistent/video.mp4")
     assert data == {}
+
+def test_probe_subtitle_tracks_nonexistent():
+    from omniextract.workers.metadata_worker import probe_subtitle_tracks_for_video
+    tracks, ext = probe_subtitle_tracks_for_video("/nonexistent/video.mp4")
+    assert tracks == []
+    assert ext == ""
+

@@ -49,12 +49,19 @@ class ClipExtractionWorker(QThread):
                     break
 
             if process is not None:
-                process.communicate()
+                try:
+                    process.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
         except Exception as exc:
             ffmpeg_error = str(exc)
             if process is not None and process.poll() is None:
                 process.kill()
-                process.wait()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
 
         if self.cancel_requested:
             if os.path.isfile(self.clip_path):
@@ -132,14 +139,27 @@ class MultiSegmentWorker(QThread):
                             self.process.wait(timeout=2)
                         except subprocess.TimeoutExpired:
                             self.process.kill()
-                            self.process.wait()
+                            try:
+                                self.process.wait(timeout=3)
+                            except subprocess.TimeoutExpired:
+                                pass
                         break
 
-                self.process.communicate()
+                try:
+                    self.process.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    try:
+                        self.process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
             except Exception as exc:
                 if self.process is not None and self.process.poll() is None:
                     self.process.kill()
-                    self.process.wait()
+                    try:
+                        self.process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
                 self._cleanup_temp_srts()
                 self.finished.emit(False, len(extracted_paths), extracted_paths, str(exc))
                 return

@@ -1,7 +1,7 @@
 import os
 
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QDesktopServices, QPixmap
+from PyQt6.QtCore import Qt, QUrl, QSize
+from PyQt6.QtGui import QDesktopServices, QPixmap, QImageReader
 from PyQt6.QtWidgets import (
     QDialog,
     QFormLayout,
@@ -78,7 +78,11 @@ class ContactSheetDialog(QDialog):
     def __init__(self, image_paths, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Contact Sheet")
-        self.resize(900, 650)
+        self.resize(920, 680)
+
+        max_display = 120
+        total_count = len(image_paths)
+        displayed_paths = image_paths[:max_display]
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -86,13 +90,21 @@ class ContactSheetDialog(QDialog):
         grid = QGridLayout(container)
 
         columns = 4
-        for index, path in enumerate(image_paths):
+        thumb_size = QSize(210, 140)
+
+        for index, path in enumerate(displayed_paths):
             label = QLabel()
-            pixmap = QPixmap(path).scaled(
-                210, 140,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
+            reader = QImageReader(path)
+            reader.setScaledSize(thumb_size)
+            img = reader.read()
+            if not img.isNull():
+                pixmap = QPixmap.fromImage(img)
+            else:
+                pixmap = QPixmap(path).scaled(
+                    210, 140,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
             label.setPixmap(pixmap)
             label.setToolTip(os.path.basename(path))
             grid.addWidget(label, index // columns, index % columns)
@@ -103,6 +115,11 @@ class ContactSheetDialog(QDialog):
         close.clicked.connect(self.accept)
 
         layout = QVBoxLayout()
+        if total_count > max_display:
+            banner = QLabel(f"Showing first {max_display} of {total_count} extracted frames.")
+            banner.setStyleSheet("color: #888; font-style: italic;")
+            layout.addWidget(banner)
+
         layout.addWidget(scroll)
         layout.addWidget(close)
         self.setLayout(layout)

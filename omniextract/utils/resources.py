@@ -6,9 +6,8 @@ import sys
 @functools.lru_cache(maxsize=128)
 def get_resource_path(relative_path):
     """Resolve file path for development or PyInstaller standalone packaging."""
-    if hasattr(sys, "_MEIPASS"):
-        base_path = sys._MEIPASS
-    else:
+    base_path = getattr(sys, "_MEIPASS", None)
+    if not base_path:
         base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
     direct_path = os.path.join(base_path, relative_path)

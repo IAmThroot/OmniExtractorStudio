@@ -356,6 +356,11 @@ class VideoPreviewDialog(QDialog):
     def _on_media_error(self, error, error_string):
         QMessageBox.warning(self, "Playback Error", f"Cannot play video:\n{error_string}")
 
+    def _set_subtitles_data(self, data):
+        self.subtitles_data = data or []
+        self._sub_starts = [item[0] for item in self.subtitles_data]
+        self._max_cue_duration = max((item[1] - item[0] for item in self.subtitles_data), default=0)
+
     def _on_subtitle_track_changed(self, index):
         if index == self.sub_combo.count() - 1:
             file_path, _ = QFileDialog.getOpenFileName(
@@ -364,7 +369,7 @@ class VideoPreviewDialog(QDialog):
                 "Subtitle Files (*.srt *.vtt);;All Files (*)"
             )
             if file_path:
-                self.subtitles_data = parse_subtitles(file_path)
+                self._set_subtitles_data(parse_subtitles(file_path))
                 lbl = f"External: {os.path.basename(file_path)}"
                 self.sub_combo.blockSignals(True)
                 self.sub_combo.setItemText(index, f"Sub: {lbl}")
@@ -374,31 +379,39 @@ class VideoPreviewDialog(QDialog):
             return
 
         if index <= 0 or index > len(self.subtitle_tracks):
-            self.subtitles_data = []
+            self._set_subtitles_data([])
             self.video_widget.set_subtitle("")
             return
 
         track = self.subtitle_tracks[index - 1]
         if track.get("type") == "external":
-            self.subtitles_data = parse_subtitles(track["path"])
+            self._set_subtitles_data(parse_subtitles(track["path"]))
         else:
             si = track["sub_index"]
             temp_ext = extract_subtitles_to_temp(self.video_path, si)
             if temp_ext:
                 self._temp_extracted_srt = temp_ext
-                self.subtitles_data = parse_subtitles(temp_ext)
+                self._set_subtitles_data(parse_subtitles(temp_ext))
+            else:
+                self._set_subtitles_data([])
 
         self._refresh_subtitle_at(self.media_player.position())
 
     def _get_subtitle_at(self, position_ms):
         if not self.subtitles_data:
             return ""
+        import bisect
+        # Find index of first cue starting after position_ms
+        idx = bisect.bisect_right(self._sub_starts, position_ms)
         active_lines = []
-        for s, e, text in self.subtitles_data:
+        cutoff = position_ms - self._max_cue_duration
+        for i in range(idx - 1, -1, -1):
+            s, e, text = self.subtitles_data[i]
+            if s < cutoff:
+                break
             if s <= position_ms <= e:
                 active_lines.append(text)
-            elif s > position_ms:
-                break
+        active_lines.reverse()
         return "\n".join(active_lines)
 
     def _refresh_subtitle_at(self, position_ms):
@@ -516,7 +529,7 @@ class VideoPreviewDialog(QDialog):
                 ffmpeg, "-y", "-v", "error", "-ss", str(timestamp_sec),
                 "-i", self.video_path, "-vframes", "1", path
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
             if res.returncode == 0 and os.path.isfile(path):
                 QMessageBox.information(self, "Frame Saved", f"Frame saved successfully.\n\n{path}")
             else:
@@ -528,7 +541,9 @@ class VideoPreviewDialog(QDialog):
         self.media_player.stop()
         if hasattr(self, "thumb_worker") and self.thumb_worker.isRunning():
             self.thumb_worker.cancel()
-            self.thumb_worker.wait(1500)
+            if not self.thumb_worker.wait(1500):
+                self.thumb_worker.terminate()
+                self.thumb_worker.wait(500)
         if self._temp_extracted_srt and os.path.exists(self._temp_extracted_srt):
             try: os.remove(self._temp_extracted_srt)
             except OSError: pass

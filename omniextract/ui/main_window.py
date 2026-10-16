@@ -57,11 +57,14 @@ from ..utils.timestamps import (
     ms_to_qtime,
     qtime_to_ms,
 )
+from ..media.hwaccel import get_hwaccel_encode_profile
 from ..workers import (
     AnimatedExportWorker,
     ClipExtractionWorker,
     FrameExtractionWorker,
     InterpolationWorker,
+    MetadataProbeWorker,
+    probe_subtitle_tracks_for_video,
     MotionExtractionWorker,
     MultiSegmentWorker,
     SceneActionWorker,
@@ -1306,12 +1309,12 @@ class OmniExtractStudio(QWidget):
     # General video handling
     # -----------------------------
 
-    def load_video_path(self, path):
+    def load_video_path(self, path, async_probe=True):
         if not path or not os.path.isfile(path):
             return
         self.source_file = path
         self.source_file_edit.setText(path)
-        self.update_video_metadata()
+        self.update_video_metadata(async_probe=async_probe)
 
     def selectSourceFile(self):
         file_name, _ = QFileDialog.getOpenFileName(
@@ -1324,7 +1327,7 @@ class OmniExtractStudio(QWidget):
             self.settings.setValue(
                 "last_source_dir", os.path.dirname(file_name)
             )
-            self.load_video_path(file_name)
+            self.load_video_path(file_name, async_probe=True)
 
     def selectSaveDir(self):
         directory = QFileDialog.getExistingDirectory(
@@ -1337,17 +1340,46 @@ class OmniExtractStudio(QWidget):
         self.save_dir_edit.setText(directory)
         self.settings.setValue("last_output_dir", directory)
 
-    def update_video_metadata(self):
-        self.current_metadata = probe_video_metadata(self.source_file)
-        
-        if not self.current_metadata:
-            self.preview_button.setEnabled(False)
-            self.info_button.setEnabled(False)
-            QMessageBox.warning(
-                self, "Unable to Open Video",
-                "The selected file could not be opened as a video."
-            )
+    def update_video_metadata(self, async_probe=False):
+        if not hasattr(self, "source_file") or not self.source_file or not os.path.isfile(self.source_file):
             return
+
+        if async_probe:
+            if hasattr(self, "_probe_worker") and self._probe_worker and self._probe_worker.isRunning():
+                self._probe_worker.terminate()
+                self._probe_worker.wait(500)
+            self._probe_worker = MetadataProbeWorker(
+                self.source_file, getattr(self, "external_subtitle_file", "")
+            )
+            self._probe_worker.metadata_ready.connect(self._on_metadata_probed)
+            self._probe_worker.error.connect(self._on_metadata_probe_error)
+            self._probe_worker.start()
+            return
+
+        # Synchronous execution (for batch mode or explicit synchronous calls)
+        metadata = probe_video_metadata(self.source_file)
+        if not metadata:
+            self._on_metadata_probe_error(self.source_file, "Unable to open video")
+            return
+        tracks, external_sub = probe_subtitle_tracks_for_video(
+            self.source_file, getattr(self, "external_subtitle_file", "")
+        )
+        self._on_metadata_probed(self.source_file, metadata, tracks, external_sub)
+
+    def _on_metadata_probe_error(self, video_path, err_msg):
+        self.preview_button.setEnabled(False)
+        self.info_button.setEnabled(False)
+        QMessageBox.warning(
+            self, "Unable to Open Video",
+            "The selected file could not be opened as a video."
+        )
+
+    def _on_metadata_probed(self, video_path, metadata, subtitle_tracks, external_sub):
+        if video_path != getattr(self, "source_file", None):
+            return
+        self.current_metadata = metadata
+        self.subtitle_tracks = subtitle_tracks
+        self.external_subtitle_file = external_sub
 
         duration_ms = self.current_metadata.get("DurationMs", 0)
 
@@ -1389,7 +1421,7 @@ class OmniExtractStudio(QWidget):
                 self._update_conv_target_fps()
             self._update_interp_target_fps()
 
-        self._probe_subtitle_tracks()
+        self._populate_subtitle_combos(select_external=bool(self.external_subtitle_file))
 
     @staticmethod
     def format_file_size(size):
@@ -1411,76 +1443,12 @@ class OmniExtractStudio(QWidget):
             self._probe_subtitle_tracks(selected_external=file_path)
 
     def _probe_subtitle_tracks(self, selected_external=None):
-        """Use ffprobe to detect embedded subtitle streams and check for external .srt/.vtt files."""
-        self.subtitle_tracks = []
-        
-        if not hasattr(self, "external_subtitle_file"):
-            self.external_subtitle_file = ""
-            
+        """Detect embedded subtitle streams and check for external .srt/.vtt files."""
         if selected_external:
             self.external_subtitle_file = selected_external
-            
-        # 1. Check for external subtitle files alongside source video
-        if hasattr(self, "source_file") and self.source_file:
-            base_dir = os.path.dirname(self.source_file)
-            base_name = os.path.splitext(os.path.basename(self.source_file))[0]
-            
-            # Check for name.srt, name.vtt, name.en.srt, etc.
-            auto_detected_subs = []
-            for ext in (".srt", ".vtt", ".en.srt", ".eng.srt", ".en.vtt"):
-                candidate = os.path.join(base_dir, base_name + ext)
-                if os.path.isfile(candidate) and candidate != self.external_subtitle_file:
-                    auto_detected_subs.append(candidate)
-                    
-            if not self.external_subtitle_file and auto_detected_subs:
-                self.external_subtitle_file = auto_detected_subs[0]
-                
-        # 2. Add user-selected or auto-detected external subtitle
-        if self.external_subtitle_file and os.path.isfile(self.external_subtitle_file):
-            self.subtitle_tracks.append({
-                "type": "external",
-                "path": self.external_subtitle_file,
-                "label": f"External: {os.path.basename(self.external_subtitle_file)}"
-            })
-            
-        # 3. Probe embedded subtitle streams via ffprobe
-        ffprobe = shutil.which("ffprobe")
-        if ffprobe and hasattr(self, "source_file") and self.source_file:
-            try:
-                result = subprocess.run(
-                    [ffprobe, "-v", "error", "-select_streams", "s",
-                     "-show_entries", "stream=index,codec_name:stream_tags=language,title",
-                     "-of", "json", self.source_file],
-                    capture_output=True, text=True, timeout=10
-                )
-                if result.returncode == 0:
-                    import json
-                    data = json.loads(result.stdout)
-                    streams = data.get("streams", [])
-                    for i, stream in enumerate(streams):
-                        tags = stream.get("tags", {})
-                        lang = tags.get("language", "und")
-                        title = tags.get("title", "")
-                        codec = stream.get("codec_name", "unknown")
-                        idx = stream.get("index", i)
-                        
-                        label = f"Track {i}: {lang}"
-                        if title:
-                            label += f" — {title}"
-                        label += f" ({codec})"
-                        
-                        self.subtitle_tracks.append({
-                            "type": "embedded",
-                            "index": idx,
-                            "sub_index": i,
-                            "codec": codec,
-                            "language": lang,
-                            "title": title,
-                            "label": label
-                        })
-            except (subprocess.TimeoutExpired, Exception):
-                pass
-                
+        self.subtitle_tracks, self.external_subtitle_file = probe_subtitle_tracks_for_video(
+            getattr(self, "source_file", ""), getattr(self, "external_subtitle_file", "")
+        )
         self._populate_subtitle_combos(select_external=bool(self.external_subtitle_file))
         
     def _populate_subtitle_combos(self, select_external=False):
@@ -2021,14 +1989,6 @@ class OmniExtractStudio(QWidget):
         has_audio = bool(source_audio_info)
 
         hw_accel = self.clip_hw_accel_combo.currentText()
-        cv_codec = "libx264"
-        if hw_accel.startswith("NVIDIA"):
-            cv_codec = "h264_nvenc"
-        elif hw_accel.startswith("Intel"):
-            cv_codec = "h264_qsv"
-        elif hw_accel.startswith("macOS"):
-            cv_codec = "h264_videotoolbox"
-
         if selected_format == "COPY (LOSSLESS)":
             video_args = ["-c:v", "copy"]
             audio_args = ["-c:a", "copy"]
@@ -2038,13 +1998,17 @@ class OmniExtractStudio(QWidget):
             audio_args = ["-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
             mux_args = []
         else:
-            video_args = ["-c:v", cv_codec]
-            if cv_codec == "libx264":
-                video_args += ["-preset", "medium", "-crf", "18"]
-            elif cv_codec == "h264_nvenc":
-                video_args += ["-preset", "p4", "-tune", "hq", "-cq", "19"]
-            elif cv_codec == "h264_videotoolbox":
-                video_args += ["-q:v", "65"]
+            if hw_accel == "Auto":
+                profile = get_hwaccel_encode_profile(preset="medium", crf=18)
+                video_args = list(profile.get("video_args", ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]))
+            elif hw_accel.startswith("NVIDIA"):
+                video_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-cq", "19"]
+            elif hw_accel.startswith("Intel"):
+                video_args = ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "19"]
+            elif hw_accel.startswith("macOS"):
+                video_args = ["-c:v", "h264_videotoolbox", "-q:v", "65"]
+            else:
+                video_args = ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
                 
             video_args += ["-pix_fmt", "yuv420p"]
             audio_args = ["-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
@@ -2095,9 +2059,10 @@ class OmniExtractStudio(QWidget):
                 if "-c:v" in cmd:
                     cv_idx = cmd.index("-c:v")
                     if cmd[cv_idx + 1] == "copy":
-                        cmd[cv_idx + 1] = "libx264"
-                        cmd.insert(cv_idx + 2, "-crf")
-                        cmd.insert(cv_idx + 3, "18")
+                        cmd.pop(cv_idx + 1)
+                        cmd.pop(cv_idx)
+                        profile = get_hwaccel_encode_profile(preset="medium", crf=18)
+                        cmd.extend(profile.get("video_args", ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]))
         
         cmd += ["-avoid_negative_ts", "make_zero", "-shortest",
                 "-progress", "pipe:1", "-nostats", clip_path]
@@ -2306,14 +2271,6 @@ class OmniExtractStudio(QWidget):
 
         selected_format = self.clip_format_combo.currentText().upper()
         hw_accel = self.clip_hw_accel_combo.currentText()
-        cv_codec = "libx264"
-        if hw_accel.startswith("NVIDIA"):
-            cv_codec = "h264_nvenc"
-        elif hw_accel.startswith("Intel"):
-            cv_codec = "h264_qsv"
-        elif hw_accel.startswith("macOS"):
-            cv_codec = "h264_videotoolbox"
-
         if selected_format == "COPY (LOSSLESS)":
             video_args = ["-c:v", "copy"]
             audio_args = ["-c:a", "copy"]
@@ -2323,13 +2280,17 @@ class OmniExtractStudio(QWidget):
             audio_args = ["-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
             mux_args = []
         else:
-            video_args = ["-c:v", cv_codec]
-            if cv_codec == "libx264":
-                video_args += ["-preset", "medium", "-crf", "18"]
-            elif cv_codec == "h264_nvenc":
-                video_args += ["-preset", "p4", "-tune", "hq", "-cq", "19"]
-            elif cv_codec == "h264_videotoolbox":
-                video_args += ["-q:v", "65"]
+            if hw_accel == "Auto":
+                profile = get_hwaccel_encode_profile(preset="medium", crf=18)
+                video_args = list(profile.get("video_args", ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]))
+            elif hw_accel.startswith("NVIDIA"):
+                video_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-cq", "19"]
+            elif hw_accel.startswith("Intel"):
+                video_args = ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "19"]
+            elif hw_accel.startswith("macOS"):
+                video_args = ["-c:v", "h264_videotoolbox", "-q:v", "65"]
+            else:
+                video_args = ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
             video_args += ["-pix_fmt", "yuv420p"]
             audio_args = ["-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
             mux_args = ["-movflags", "+faststart"] if selected_format in ("MP4", "MOV") else []
@@ -2397,9 +2358,10 @@ class OmniExtractStudio(QWidget):
                     if "-c:v" in seg_cmd:
                         cv_idx = seg_cmd.index("-c:v")
                         if seg_cmd[cv_idx + 1] == "copy":
-                            seg_cmd[cv_idx + 1] = "libx264"
-                            seg_cmd.insert(cv_idx + 2, "-crf")
-                            seg_cmd.insert(cv_idx + 3, "18")
+                            seg_cmd.pop(cv_idx + 1)
+                            seg_cmd.pop(cv_idx)
+                            profile = get_hwaccel_encode_profile(preset="medium", crf=18)
+                            seg_cmd.extend(profile.get("video_args", ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]))
                             
             seg_cmd += ["-avoid_negative_ts", "make_zero", "-shortest", "-progress", "pipe:1", "-nostats", out_path]
             
@@ -3203,7 +3165,7 @@ class OmniExtractStudio(QWidget):
             
         job = self.batch_jobs.pop(0)
         path = job["path"]
-        self.load_video_path(path)
+        self.load_video_path(path, async_probe=False)
         self.in_batch_mode = True
         
         state = job["state"]
