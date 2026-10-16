@@ -74,9 +74,10 @@ class FrameExtractionWorker(QThread):
             except Exception as e:
                 self.error.emit(f"Could not open manifest: {e}")
 
-        import os
         workers = (os.cpu_count() or 4)
-        max_in_flight = workers * 2
+        # Bound in-flight (uncompressed) frames independently of core count so
+        # 4K/8K extraction does not balloon to hundreds of MB of buffered images.
+        max_in_flight = max(2, min(4, workers))
         sem = threading.Semaphore(max_in_flight)
         write_error = []
 

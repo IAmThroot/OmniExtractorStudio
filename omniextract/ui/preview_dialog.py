@@ -1,4 +1,5 @@
 import os
+import time
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QIcon, QImage, QPixmap
@@ -209,6 +210,7 @@ class VideoPreviewDialog(QDialog):
         self.subtitles_data = []
         self._temp_extracted_srt = None
         self._slider_dragging = False
+        self._last_scrub_seek = 0.0
 
         if not metadata:
             metadata = probe_video_metadata(video_path)
@@ -426,7 +428,12 @@ class VideoPreviewDialog(QDialog):
         self.media_player.setPosition(self.position_slider.value())
 
     def _on_slider_moved(self, pos):
-        self.media_player.setPosition(pos)
+        # Throttle seeks while scrubbing (the exact final position is applied
+        # on release) to avoid flooding the media backend on every pixel move.
+        now = time.monotonic()
+        if now - self._last_scrub_seek >= 0.1:
+            self._last_scrub_seek = now
+            self.media_player.setPosition(pos)
         self.time_label.setText(f"{format_timestamp(pos)} / {format_timestamp(self.duration_ms)}")
         self._refresh_subtitle_at(pos)
 

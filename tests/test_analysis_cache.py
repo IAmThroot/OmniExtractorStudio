@@ -62,3 +62,46 @@ def test_analysis_cache_save_load_scenes(mock_get_cache_dir):
             assert loaded == scenes
         finally:
             os.remove(path)
+
+
+@patch('omniextract.media.analysis_cache.get_cache_dir')
+def test_analysis_cache_corrupt_json_returns_none(mock_get_cache_dir):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        mock_get_cache_dir.return_value = temp_dir
+
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"video")
+            path = f.name
+
+        try:
+            cache = AnalysisCache(path)
+            os.makedirs(cache.cache_dir, exist_ok=True)
+            with open(os.path.join(cache.cache_dir, "metadata.json"), "w", encoding="utf-8") as fh:
+                fh.write("{ this is not valid json")
+
+            # Corrupt cache must degrade gracefully instead of raising.
+            assert cache.load_metadata() is None
+            assert cache.is_valid() is False
+        finally:
+            os.remove(path)
+
+
+@patch('omniextract.media.analysis_cache.get_cache_dir')
+def test_analysis_cache_invalidate_is_idempotent(mock_get_cache_dir):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        mock_get_cache_dir.return_value = temp_dir
+
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"video")
+            path = f.name
+
+        try:
+            cache = AnalysisCache(path)
+            cache.save_metadata({"DurationMs": 1000})
+            assert os.path.isdir(cache.cache_dir)
+            cache.invalidate()
+            assert not os.path.isdir(cache.cache_dir)
+            # Calling again on a missing dir must not raise.
+            cache.invalidate()
+        finally:
+            os.remove(path)

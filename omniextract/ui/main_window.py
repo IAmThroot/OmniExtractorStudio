@@ -1611,7 +1611,7 @@ class OmniExtractStudio(QWidget):
             for w in (
                 "frame_worker", "clip_worker", "scene_worker", "scene_action_worker",
                 "gif_worker", "motion_worker", "multi_segment_worker",
-                "interp_worker", "conv_worker"
+                "interp_worker", "conv_worker", "_probe_worker"
             )
         ]
         running = [w for w in workers if w and w.isRunning()]
@@ -1625,8 +1625,13 @@ class OmniExtractStudio(QWidget):
                 w.cancel_requested = True
 
         for w in running:
-            if w.isRunning():
-                w.wait(250)
+            if w.isRunning() and not w.wait(250):
+                # Worker did not stop cooperatively; force it down so the app can exit.
+                try:
+                    w.terminate()
+                    w.wait(500)
+                except Exception:
+                    pass
 
         self.save_settings()
         event.accept()
@@ -1868,6 +1873,29 @@ class OmniExtractStudio(QWidget):
                 return 0.0
         return 0.0
 
+    def _resolve_clip_video_args(self, hw_accel):
+        """Resolve FFmpeg video-encode args (excluding -pix_fmt) for the clip workflow.
+
+        Centralizes the hardware-acceleration mapping so the subtitle-burn
+        re-encode path and both clip exporters stay in sync. The underlying
+        capability probe is cached, so this is cheap to call repeatedly.
+        """
+        fallback = ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+        if hw_accel == "Auto":
+            profile = list(get_hwaccel_encode_profile(preset="medium", crf=18).get("video_args", fallback))
+            # The caller appends a single -pix_fmt, so drop the profile's own.
+            if "-pix_fmt" in profile:
+                idx = profile.index("-pix_fmt")
+                del profile[idx:idx + 2]
+            return profile
+        if hw_accel.startswith("NVIDIA"):
+            return ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-cq", "19"]
+        if hw_accel.startswith("Intel"):
+            return ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "19"]
+        if hw_accel.startswith("macOS"):
+            return ["-c:v", "h264_videotoolbox", "-q:v", "65"]
+        return fallback
+
     def sync_clip_time_to_frame(self):
         fps = self._get_current_fps()
         if fps <= 0:
@@ -1998,17 +2026,7 @@ class OmniExtractStudio(QWidget):
             audio_args = ["-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
             mux_args = []
         else:
-            if hw_accel == "Auto":
-                profile = get_hwaccel_encode_profile(preset="medium", crf=18)
-                video_args = list(profile.get("video_args", ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]))
-            elif hw_accel.startswith("NVIDIA"):
-                video_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-cq", "19"]
-            elif hw_accel.startswith("Intel"):
-                video_args = ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "19"]
-            elif hw_accel.startswith("macOS"):
-                video_args = ["-c:v", "h264_videotoolbox", "-q:v", "65"]
-            else:
-                video_args = ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+            video_args = self._resolve_clip_video_args(hw_accel)
                 
             video_args += ["-pix_fmt", "yuv420p"]
             audio_args = ["-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
@@ -2061,8 +2079,7 @@ class OmniExtractStudio(QWidget):
                     if cmd[cv_idx + 1] == "copy":
                         cmd.pop(cv_idx + 1)
                         cmd.pop(cv_idx)
-                        profile = get_hwaccel_encode_profile(preset="medium", crf=18)
-                        cmd.extend(profile.get("video_args", ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]))
+                        cmd.extend(self._resolve_clip_video_args(hw_accel) + ["-pix_fmt", "yuv420p"])
         
         cmd += ["-avoid_negative_ts", "make_zero", "-shortest",
                 "-progress", "pipe:1", "-nostats", clip_path]
@@ -2280,17 +2297,7 @@ class OmniExtractStudio(QWidget):
             audio_args = ["-c:a", "libmp3lame", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
             mux_args = []
         else:
-            if hw_accel == "Auto":
-                profile = get_hwaccel_encode_profile(preset="medium", crf=18)
-                video_args = list(profile.get("video_args", ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]))
-            elif hw_accel.startswith("NVIDIA"):
-                video_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-cq", "19"]
-            elif hw_accel.startswith("Intel"):
-                video_args = ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", "19"]
-            elif hw_accel.startswith("macOS"):
-                video_args = ["-c:v", "h264_videotoolbox", "-q:v", "65"]
-            else:
-                video_args = ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+            video_args = self._resolve_clip_video_args(hw_accel)
             video_args += ["-pix_fmt", "yuv420p"]
             audio_args = ["-c:a", "aac", "-profile:a", "aac_low", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
             mux_args = ["-movflags", "+faststart"] if selected_format in ("MP4", "MOV") else []
@@ -2360,8 +2367,7 @@ class OmniExtractStudio(QWidget):
                         if seg_cmd[cv_idx + 1] == "copy":
                             seg_cmd.pop(cv_idx + 1)
                             seg_cmd.pop(cv_idx)
-                            profile = get_hwaccel_encode_profile(preset="medium", crf=18)
-                            seg_cmd.extend(profile.get("video_args", ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]))
+                            seg_cmd.extend(self._resolve_clip_video_args(hw_accel) + ["-pix_fmt", "yuv420p"])
                             
             seg_cmd += ["-avoid_negative_ts", "make_zero", "-shortest", "-progress", "pipe:1", "-nostats", out_path]
             

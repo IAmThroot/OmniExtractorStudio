@@ -41,3 +41,31 @@ def test_write_shifted_srt():
     assert "Segment Two" in content
 
     os.remove(shifted_path)
+
+
+VTT_SAMPLE = """WEBVTT
+
+NOTE a comment that must be ignored
+
+cue-1
+00:00:03.00 --> 00:00:05.500 align:start position:10%
+Hello <b>World</b>
+second line
+
+1:02:03,004 --> 1:02:05,000
+{styled} Tail &amp; text
+"""
+
+
+def test_parse_subtitles_vtt_robust(tmp_path):
+    vtt_file = tmp_path / "test.vtt"
+    vtt_file.write_text(VTT_SAMPLE, encoding="utf-8")
+
+    entries = parse_subtitles(str(vtt_file))
+    # Two cues: tolerant of 2-digit ms, single-digit hour, cue settings and entities.
+    assert entries[0] == (3000, 5500, "Hello World\nsecond line")
+    assert entries[1] == (3723004, 3725000, "Tail & text")
+
+
+def test_parse_subtitles_missing_file():
+    assert parse_subtitles("/nonexistent/captions.srt") == []

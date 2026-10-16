@@ -5,6 +5,8 @@ import subprocess
 import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from ..media.hwaccel import probe_capabilities, get_hwaccel_encode_profile
+
 
 class SceneDetectionWorker(QThread):
     progress = pyqtSignal(int)
@@ -217,6 +219,13 @@ class SceneActionWorker(QThread):
         split_count = 0
         errors = []
 
+        # Resolve the hardware-accelerated encode profile once (probing spawns
+        # ffmpeg subprocesses) rather than per clip inside the loop.
+        caps = probe_capabilities()
+        encode_args = get_hwaccel_encode_profile(
+            caps, codec='h264', quality_crf=18, preset='fast'
+        )
+
         for i in range(total_clips):
             if self.cancel_requested:
                 break
@@ -231,10 +240,6 @@ class SceneActionWorker(QThread):
 
             ext = self.extension.lstrip(".")
             out_path = self.path_cb(self.save_dir, f"scene_{i+1}_clip.{ext}", used_names)
-
-            from ..media.hwaccel import probe_capabilities, get_hwaccel_encode_profile
-            caps = probe_capabilities()
-            encode_args = get_hwaccel_encode_profile(caps, codec='h264', quality_crf=18, preset='fast')
 
             cmd = [
                 ffmpeg, "-y", "-hide_banner", "-loglevel", "error",

@@ -60,3 +60,12 @@ def test_get_hwaccel_encode_profile():
     assert profile.get("video_args") == list(profile)
 
 
+def test_capability_probe_is_cached():
+    from omniextract.media import hwaccel
+    hwaccel.invalidate_capability_cache()
+    first = hwaccel.probe_capabilities()
+    second = hwaccel.probe_capabilities()
+    # Cached: identical object means ffmpeg is probed at most once per session.
+    assert first is second
+    hwaccel.invalidate_capability_cache()
+    assert hwaccel.probe_capabilities() is not first

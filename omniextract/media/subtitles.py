@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from html import unescape
 
 import cv2
 import numpy as np
@@ -12,10 +13,29 @@ import numpy as np
 from ..utils.timestamps import format_timestamp
 
 
+# Matches HH:MM:SS,mmm --> HH:MM:SS,mmm tolerating 1-3 digit hours and
+# 1-3 digit milliseconds (SRT uses ',' and WebVTT uses '.').
+_TIME_RE = re.compile(
+    r'(\d{1,3}):([0-5]?\d):([0-5]?\d)[,.](\d{1,3})\s*-->\s*'
+    r'(\d{1,3}):([0-5]?\d):([0-5]?\d)[,.](\d{1,3})'
+)
+_TAG_RE = re.compile(r'<[^>]+>')
+_VTT_TAG_RE = re.compile(r'\{[^}]*\}')
+
+
+def _time_to_ms(hours, minutes, seconds, fraction):
+    frac = (fraction + "00")[:3]
+    return ((int(hours) * 60 + int(minutes)) * 60 + int(seconds)) * 1000 + int(frac)
+
+
 def parse_subtitles(file_path):
     """
     Parses .srt or .vtt subtitle file into a sorted list of tuples:
     [(start_ms, end_ms, text), ...]
+
+    Uses a linear block scan rather than a single backtracking regex, so it is
+    safe on very large subtitle files, and tolerates single-digit hours,
+    1-3 digit milliseconds, WebVTT cue settings, and inline tags.
     """
     if not file_path or not os.path.isfile(file_path):
         return []
@@ -27,29 +47,33 @@ def parse_subtitles(file_path):
         return []
 
     content = content.replace("\r\n", "\n").replace("\r", "\n")
-    pattern = re.compile(
-        r'(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(?:(\d{1,2}):)?(\d{2}):(\d{2})[,.](\d{3})(?:[^\n]*)?\n(.*?)(?=\n\n|\n\d+\n|\Z)',
-        re.DOTALL
-    )
 
     entries = []
-    for match in pattern.finditer(content):
-        sh1, sm1, ss1, sms1, sh2, sm2, ss2, sms2, text = match.groups()
-        h1 = int(sh1) if sh1 else 0
-        m1 = int(sm1)
-        s1 = int(ss1)
-        ms1 = int(sms1)
-        start_ms = (h1 * 3600 + m1 * 60 + s1) * 1000 + ms1
+    for block in content.split("\n\n"):
+        lines = block.split("\n")
+        timing_positions = []
+        for idx, line in enumerate(lines):
+            m = _TIME_RE.search(line)
+            if m:
+                timing_positions.append((idx, m))
 
-        h2 = int(sh2) if sh2 else 0
-        m2 = int(sm2)
-        s2 = int(ss2)
-        ms2 = int(sms2)
-        end_ms = (h2 * 3600 + m2 * 60 + s2) * 1000 + ms2
+        for k, (idx, m) in enumerate(timing_positions):
+            end_line = timing_positions[k + 1][0] if k + 1 < len(timing_positions) else len(lines)
+            start_ms = _time_to_ms(*m.group(1, 2, 3, 4))
+            end_ms = _time_to_ms(*m.group(5, 6, 7, 8))
 
-        clean_text = re.sub(r'<[^>]+>', '', text).strip()
-        if clean_text:
-            entries.append((start_ms, end_ms, clean_text))
+            text_lines = lines[idx + 1:end_line]
+            # Drop framing-only lines (trailing blanks, leading cue numbers).
+            while text_lines and not text_lines[-1].strip():
+                text_lines.pop()
+            while text_lines and text_lines[0].strip().isdigit():
+                text_lines.pop(0)
+
+            raw_text = "\n".join(text_lines)
+            text = _TAG_RE.sub("", _VTT_TAG_RE.sub("", raw_text))
+            clean_text = unescape(text).replace("\xa0", " ").strip()
+            if clean_text:
+                entries.append((start_ms, end_ms, clean_text))
 
     entries.sort(key=lambda x: x[0])
     return entries
@@ -60,7 +84,12 @@ def draw_subtitle_on_frame(image, text):
     if not text or image is None:
         return image
 
-    h, w, _ = image.shape
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif image.shape[2] == 1:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    h, w = image.shape[:2]
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     if not lines:
         return image
@@ -86,7 +115,7 @@ def draw_subtitle_on_frame(image, text):
 
     if box_y2 > box_y1 and box_x2 > box_x1:
         roi = image[box_y1:box_y2, box_x1:box_x2]
-        image[box_y1:box_y2, box_x1:box_x2] = (roi * 0.35).astype(np.uint8)
+        image[box_y1:box_y2, box_x1:box_x2] = (roi.astype(np.float32) * 0.35).astype(np.uint8)
 
     for i, line in enumerate(lines):
         line_w = line_sizes[i][0]

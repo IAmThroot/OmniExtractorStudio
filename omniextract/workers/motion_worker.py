@@ -1,3 +1,4 @@
+import math
 import shutil
 import subprocess
 
@@ -34,10 +35,13 @@ class MotionExtractionWorker(QThread):
     def run(self):
         cap = cv2.VideoCapture(self.source_file)
         if not cap.isOpened():
+            cap.release()
             self.finished.emit(False, 0, "Could not open source file.")
             return
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or not math.isfinite(fps) or fps <= 0:
+            fps = 30.0
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         is_yolo = "YOLO" in self.engine
@@ -45,9 +49,14 @@ class MotionExtractionWorker(QThread):
         fgbg = None
         yolo_detector = None
         if is_yolo:
-            from ..ai.detector import YOLOPresenceDetector
-            model_path = get_resource_path("assets/models/yolov8n.onnx")
-            yolo_detector = YOLOPresenceDetector(model_path)
+            try:
+                from ..ai.detector import YOLOPresenceDetector
+                model_path = get_resource_path("assets/models/yolov8n.onnx")
+                yolo_detector = YOLOPresenceDetector(model_path)
+            except Exception as exc:
+                cap.release()
+                self.finished.emit(False, 0, f"Failed to load YOLO model: {exc}")
+                return
         else:
             var_threshold = max(5, 200 - int(self.sensitivity * 1.95))
             fgbg = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=var_threshold, detectShadows=False)
@@ -63,6 +72,9 @@ class MotionExtractionWorker(QThread):
         # Read first frame to determine area scaling factor
         success, frame = cap.read()
         if not success:
+            cap.release()
+            if yolo_detector:
+                yolo_detector.close()
             self.finished.emit(False, 0, "Could not read video stream.")
             return
 
@@ -138,12 +150,16 @@ class MotionExtractionWorker(QThread):
         cap.release()
 
         if self.cancel_requested:
+            if yolo_detector:
+                yolo_detector.close()
             self.finished.emit(False, extracted_count, "Cancelled")
             return
 
         if self.mode == "Clips" and motion_intervals:
             ffmpeg = shutil.which("ffmpeg")
             if not ffmpeg:
+                if yolo_detector:
+                    yolo_detector.close()
                 self.finished.emit(False, 0, "FFmpeg not found for clip extraction.")
                 return
 

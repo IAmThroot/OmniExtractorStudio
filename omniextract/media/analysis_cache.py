@@ -2,6 +2,7 @@
 Per-video analysis caching system.
 """
 
+import functools
 import os
 import json
 import hashlib
@@ -45,8 +46,9 @@ def compute_video_hash(video_path: str) -> str:
     except (OSError, IOError):
         return ""
 
+@functools.lru_cache(maxsize=1)
 def get_cache_dir() -> str:
-    """Get the base cache directory path."""
+    """Get the base cache directory path (cached to avoid repeated syscalls)."""
     from PyQt6.QtCore import QStandardPaths
     cache_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)
     app_cache_dir = os.path.join(cache_path, "OmniExtract")
@@ -84,9 +86,16 @@ class AnalysisCache:
         os.makedirs(self.cache_dir, exist_ok=True)
         target = os.path.join(self.cache_dir, filename)
         temp_target = target + ".tmp"
-        with open(temp_target, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(temp_target, target)
+        try:
+            with open(temp_target, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(temp_target, target)
+        except OSError:
+            # Disk full / permission / lock: never leave a partial temp file behind.
+            try:
+                os.remove(temp_target)
+            except OSError:
+                pass
 
     def _load_json(self, filename: str):
         if not self.cache_dir:
@@ -97,7 +106,7 @@ class AnalysisCache:
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             return None
 
     def save_metadata(self, metadata: dict):
@@ -117,9 +126,15 @@ class AnalysisCache:
         os.makedirs(self.cache_dir, exist_ok=True)
         target = os.path.join(self.cache_dir, 'waveform.dat')
         temp_target = target + ".tmp"
-        with open(temp_target, 'wb') as f:
-            f.write(data)
-        os.replace(temp_target, target)
+        try:
+            with open(temp_target, 'wb') as f:
+                f.write(data)
+            os.replace(temp_target, target)
+        except OSError:
+            try:
+                os.remove(temp_target)
+            except OSError:
+                pass
 
     def load_waveform(self) -> Optional[bytes]:
         """Load raw waveform data."""
@@ -128,8 +143,11 @@ class AnalysisCache:
         filepath = os.path.join(self.cache_dir, 'waveform.dat')
         if not os.path.isfile(filepath):
             return None
-        with open(filepath, 'rb') as f:
-            return f.read()
+        try:
+            with open(filepath, 'rb') as f:
+                return f.read()
+        except OSError:
+            return None
             
     def save_scenes(self, scenes: List[dict]):
         self._save_json('scenes.json', scenes)
@@ -146,4 +164,4 @@ class AnalysisCache:
     def invalidate(self):
         """Remove entire cache directory for this video."""
         if self.cache_dir and os.path.isdir(self.cache_dir):
-            shutil.rmtree(self.cache_dir)
+            shutil.rmtree(self.cache_dir, ignore_errors=True)

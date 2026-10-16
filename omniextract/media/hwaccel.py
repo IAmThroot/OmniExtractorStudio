@@ -1,8 +1,9 @@
+import functools
 import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -12,8 +13,9 @@ class HardwareCapabilities:
     ai: List[str]
 
 
+@functools.lru_cache(maxsize=1)
 def probe_decode_capabilities() -> List[str]:
-    """Probe FFmpeg for available hardware decoders."""
+    """Probe FFmpeg for available hardware decoders (cached: spawns ffmpeg)."""
     ffmpeg_path = shutil.which('ffmpeg')
     if not ffmpeg_path:
         return []
@@ -42,8 +44,9 @@ def probe_decode_capabilities() -> List[str]:
         return []
 
 
+@functools.lru_cache(maxsize=1)
 def probe_encode_capabilities() -> List[str]:
-    """Probe FFmpeg for available hardware encoders using robust regex parsing."""
+    """Probe FFmpeg for available hardware encoders using robust regex parsing (cached: spawns ffmpeg)."""
     ffmpeg_path = shutil.which('ffmpeg')
     if not ffmpeg_path:
         return []
@@ -78,8 +81,13 @@ def probe_encode_capabilities() -> List[str]:
         return []
 
 
+@functools.lru_cache(maxsize=1)
 def probe_capabilities() -> HardwareCapabilities:
-    """Probe system for hardware acceleration capabilities."""
+    """Probe system for hardware acceleration capabilities (cached).
+
+    Spawns two ffmpeg subprocesses, so callers that run on the UI thread can
+    rely on the first call being the only blocking probe for the session.
+    """
     decode = probe_decode_capabilities()
     encode = probe_encode_capabilities()
     ai = []
@@ -91,6 +99,13 @@ def probe_capabilities() -> HardwareCapabilities:
         pass
 
     return HardwareCapabilities(decode=decode, encode=encode, ai=ai)
+
+
+def invalidate_capability_cache() -> None:
+    """Clear cached hardware capability probes (e.g. after a driver change)."""
+    probe_decode_capabilities.cache_clear()
+    probe_encode_capabilities.cache_clear()
+    probe_capabilities.cache_clear()
 
 
 def get_hwaccel_decode_args(capabilities: HardwareCapabilities) -> List[str]:

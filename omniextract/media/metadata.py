@@ -74,7 +74,7 @@ def probe_video_metadata(video_path):
                 pass
 
         # parse duration
-        duration_sec = float(fmt.get("duration", 0.0))
+        duration_sec = float(fmt.get("duration") or stream.get("duration") or 0.0)
         duration_ms = int(duration_sec * 1000)
             
         # parse frame count
@@ -86,7 +86,12 @@ def probe_video_metadata(video_path):
                 frame_count = int(duration_sec * fps) if fps > 0 else 0
         else:
             frame_count = int(duration_sec * fps) if fps > 0 else 0
-                
+
+        try:
+            file_size = format_file_size(os.path.getsize(video_path))
+        except OSError:
+            file_size = "Unknown"
+
     except Exception as e:
         print(f"probe_video_metadata error: {e}", file=sys.stderr)
         return {}
@@ -104,7 +109,7 @@ def probe_video_metadata(video_path):
         "Width": width,
         "Height": height,
         "Codec": codec or "Unknown",
-        "File Size": format_file_size(os.path.getsize(video_path))
+        "File Size": file_size
     }
 
 
@@ -123,8 +128,8 @@ def probe_video_chapters(source_file):
             raw_chapters = data.get("chapters", [])
             chapters = []
             for i, chap in enumerate(raw_chapters):
-                start_sec = float(chap.get("start_time", 0.0))
-                end_sec = float(chap.get("end_time", 0.0))
+                start_sec = float(chap.get("start_time") or 0.0)
+                end_sec = float(chap.get("end_time") or 0.0)
                 start_ms = round(start_sec * 1000)
                 end_ms = round(end_sec * 1000)
 

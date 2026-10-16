@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Corrected PNG Quality Inversion**: Fixed PNG compression scale mapping so that 0–100 quality maps properly to libpng's 0–9 compression range (`IMWRITE_PNG_COMPRESSION`).
 - **Downscaled Blur Detection & Streaming Manifest**: Frame extraction now downscales Laplacian blur detection images to $\le 720\text{p}$ in float32 (saving ~66MB per 4K frame) and streams CSV manifests directly to disk with periodic flushing.
 
+### Fixed
+- **Python < 3.14 Import Failure**: `get_hwaccel_encode_profile()` referenced `Optional` without importing it. On Python 3.9–3.13 (including CI's 3.10) annotations are evaluated eagerly, so `import omniextract.media.hwaccel` raised `NameError` and the whole app failed to start. Added the missing import and a regression test.
+- **Cached Hardware Probes**: `probe_capabilities()` / `probe_decode_capabilities()` / `probe_encode_capabilities()` are now `lru_cache`d and expose `invalidate_capability_cache()`, so the two blocking `ffmpeg` probes no longer run per export (or per scene clip). Scene splitting resolves the encode profile once instead of once per clip.
+- **Clip Encoder Resolution Unified**: Both clip exporters and the subtitle-burn re-encode path now share `_resolve_clip_video_args()`, removing the duplicated hwaccel mapping and the double capability probe.
+- **Robust Subtitle Parser**: Replaced the single backtracking regex with a linear block scan that tolerates single-digit hours, 1–3 digit milliseconds, WebVTT cue settings/`NOTE` blocks, inline `{}`/`<>` tags, and HTML entities.
+- **Graceful Cache/IO Failures**: `analysis_cache` now handles corrupt JSON and I/O errors without raising, removes partial temp files, and `invalidate()` is idempotent; `probe_video_metadata()` no longer crashes on `duration: null` or a missing file during `getsize`, and chapter parsing accepts missing timestamps.
+- **Motion Worker Cleanup**: Guaranteed `VideoCapture`/YOLO session release on every early-return path, guarded against zero/NaN FPS, and surfaced YOLO model-load failures as errors instead of crashing the thread.
+- **Bounded Frame Extraction Memory**: In-flight uncompressed frames are capped (≤ 4) independently of core count to avoid multi-hundred-MB spikes on 4K/8K extraction.
+- **Debounced Preview Scrubbing**: Slider drags now throttle media seeks to ~10/s while keeping the timeline/time label live, instead of seeking on every pixel move.
+
 ## [1.2.0] - 2026-10-16
 
 ### Added
