@@ -16,7 +16,7 @@ def format_file_size(size):
         value /= 1024
 
 
-def probe_video_metadata(video_path):
+def probe_video_metadata(video_path, owner=None):
     """Probe video properties using ffprobe (avoids OpenCV hanging on MKVs) and return metadata dictionary."""
     if not video_path or not os.path.isfile(video_path):
         return {}
@@ -30,7 +30,11 @@ def probe_video_metadata(video_path):
             ffprobe, "-v", "error", "-show_format", "-show_streams",
             "-select_streams", "v:0", "-of", "json", video_path
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if owner is None:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        else:
+            from .process import run_cancellable
+            res = run_cancellable(owner, cmd, timeout=10)
         if res.returncode != 0:
             print(f"ffprobe failed for {video_path}: {res.stderr}", file=sys.stderr)
             return {}

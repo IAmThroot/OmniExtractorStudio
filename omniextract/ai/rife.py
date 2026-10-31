@@ -1,5 +1,5 @@
 """
-RIFE and FILM AI Frame Interpolation helper and model manager.
+RIFE ONNX frame interpolation helper and model manager.
 """
 
 import os
@@ -30,7 +30,7 @@ COMFY_FRAME_INTERP_URL = "https://huggingface.co/Comfy-Org/frame_interpolation"
 
 
 def find_rife_model(custom_path: Optional[str] = None) -> Optional[str]:
-    """Find a valid RIFE/FILM model file path, checking custom path and assets/models/."""
+    """Find a candidate interpolation model file path, checking custom path and assets/models/."""
     if custom_path is not None:
         return custom_path if os.path.isfile(custom_path) else None
 

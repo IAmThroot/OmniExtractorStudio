@@ -1,6 +1,6 @@
 <div align="center">
   <img src="assets/screenshots/hero_icon.png" width="128" height="128" alt="OmniExtract Studio Logo">
-  <h1>OmniExtract Studio v1.3.0</h1>
+  <h1>OmniExtract Studio v1.4.0</h1>
   <p><b>An all-in-one desktop application designed for high-precision video processing, frame extraction, intelligent motion tracking, and more.</b></p>
   
   [![GitHub Release](https://img.shields.io/github/v/release/IAmThroot/OmniExtractorStudio)](https://github.com/IAmThroot/OmniExtractorStudio/releases)
@@ -19,8 +19,6 @@
   
   <img src="assets/screenshots/main_interface.png" alt="App Screenshot" width="100%">
 </div>
-
----
 
 ---
 
@@ -170,7 +168,7 @@ Change video framerate by dropping/duplicating frames, blending, or conforming p
 1. **Conversion Mode**:
    - **Standard Resample**: Drops or duplicates frames (`fps` filter) to reach the target rate while preserving video playback speed and duration.
    - **Frame Blending**: Blends adjacent frames to reduce judder when down-sampling high framerate video.
-   - **Conform Playback Speed**: Re-interprets frame presentation timestamps (`setpts`) to change playback speed (e.g. interpreting 60 FPS footage at 24 FPS for 0.4x cinematic slow-motion, or speeding up footage) without dropping or duplicating any frames.
+   - **Conform Playback Speed**: Re-interprets frame presentation timestamps (`setpts`) to change playback speed (e.g. interpreting 60 FPS footage at 24 FPS for 0.4x cinematic slow-motion, or speeding up footage) without dropping or duplicating any frames. Kept audio is retimed with pitch preservation and encoded as AAC; mute remains available.
 2. **Target Rate**: Presets for 24 FPS (Cinematic standard), 25 FPS (PAL), 29.97 FPS, 30 FPS, 50 FPS, 59.94 FPS, 60 FPS, 120 FPS, 0.5x, 2x, or custom spinbox.
 3. Click **Convert Framerate** or **Send to Batch Queue**.
 
@@ -182,7 +180,7 @@ Generate brand new in-between frames for super-smooth playback or slow motion:
      - *Motion Compensation*: Adaptive Overlapped Block Motion Compensation (`aobmc` - recommended) or `obmc`.
      - *Estimation Algorithm*: `epzs` (fast diamond search), `hexbs` (balanced hexagonal), or `esa` (exhaustive highest quality).
      - *Scene Cut Guard*: Prevents warping or ghosting across camera cuts by detecting shot transitions (`scd=fdiff`, default sensitivity: `10.0%`).
-   - **AI Neural Interpolation (RIFE & FILM)**: Deep learning neural frame generation running locally.
+   - **AI Neural Interpolation (RIFE ONNX)**: Deep learning neural frame generation running locally.
 3. **Optional AI Neural Interpolation Model Setup**:
    Download the pre-converted ONNX model:
    - **RIFE FP32 ONNX (`RIFE_fp32.onnx` - Recommended)**:
@@ -221,7 +219,7 @@ Generate brand new in-between frames for super-smooth playback or slow motion:
 
 - **Full-App Presets System**: Save and load your configuration across the entire app. Comes with built-in profiles like "Discord Reaction GIF" and "Security Highlights", plus the ability to save custom configurations.
 - **Smart Batch Queueing**: Automate processing across entire folders by generating Bulk Custom Jobs (Frames, Clips, Motion Highlights, GIFs) on the fly.
-- **Custom Job Queueing**: Need granular control? Queue up specific videos with unique, independent settings (trim times, resolution, subtitles) to be processed seamlessly in the background.
+- **Custom Job Queueing**: Need granular control? Queue up specific videos with unique, independent settings (trim times, resolution, subtitles) to be processed sequentially. Each queued job keeps its own processing settings, subtitle selection, and custom model path. Failed jobs are recorded while remaining jobs continue; cancelling stops the batch. A final summary lists successes and failures.
 
 ### Screenshots
 
@@ -276,6 +274,14 @@ If running from source:
 
 ---
 
+## Version 1.4 reliability
+
+Only one processing job runs at a time. Source-dependent actions stay disabled until metadata is available. Closing the app requests cancellation and waits for workers and child processes to finish cleanup. Export counts reflect successfully written files; completed outputs survive a later failure or cancellation.
+
+Neural interpolation supports compatible RIFE ONNX graphs. Raw PyTorch and FILM checkpoints are not supported. GPU execution requires a compatible ONNX Runtime provider and drivers.
+
+---
+
 ## ⚠️ Known Limitations
 
 - Subtitle burning requires re-encoding the video track, which can take time for large files.
@@ -292,7 +298,7 @@ To run the test suite:
 1. Ensure you have installed the test dependencies (e.g., `pip install pytest`).
 2. Run `pytest` from the root directory:
    ```bash
-   pytest tests/
+   python -m pytest tests/
    ```
 
 ---

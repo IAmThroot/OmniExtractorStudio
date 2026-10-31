@@ -1,6 +1,7 @@
 import os
 import sys
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QPushButton
 
@@ -25,6 +26,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Throot Omni Extract Studio")
     app.setOrganizationName("Throot")
+    app.setApplicationDisplayName("OmniExtract Studio")
 
     # On Windows, taskbars and titlebars prefer .ico multi-resolution format
     icon_candidates = [
@@ -50,6 +52,8 @@ def main():
 
     scenes = QPushButton("Scene Detection")
     scenes.clicked.connect(ex.detectScenes)
+    ex.scene_detect_button = scenes
+    ex._refresh_job_controls()
 
     about_btn = QPushButton("About")
     about_btn.clicked.connect(lambda: AboutDialog(ex).exec())
@@ -61,6 +65,8 @@ def main():
     ex.layout().insertLayout(0, toolbar)
 
     ex.show()
+    if "--smoke-test" in sys.argv:
+        QTimer.singleShot(0, ex.close)
     sys.exit(app.exec())
 
 

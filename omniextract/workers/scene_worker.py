@@ -1,3 +1,7 @@
+from ..media.process import remove_file
+import os
+from ..media.process import progress_lines, run_cancellable
+from .base import ManagedWorker, ResultFormat
 import re
 import shutil
 import subprocess
@@ -8,7 +12,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from ..media.hwaccel import probe_capabilities, get_hwaccel_encode_profile
 
 
-class SceneDetectionWorker(QThread):
+class SceneDetectionWorker(ManagedWorker):
+    result_format = ResultFormat.SCENES
     progress = pyqtSignal(int)
     finished = pyqtSignal(list, int, float)
     error = pyqtSignal(str)
@@ -20,7 +25,7 @@ class SceneDetectionWorker(QThread):
         self.cancel_requested = False
         self.process = None
 
-    def run(self):
+    def _run(self):
         cap = cv2.VideoCapture(self.source_file)
         if not cap.isOpened():
             self.error.emit("Could not open video.")
@@ -64,8 +69,7 @@ class SceneDetectionWorker(QThread):
         scenes = []
         pts_regex = re.compile(r"pts_time:([0-9.]+)")
 
-        while not self.cancel_requested:
-            line = self.process.stderr.readline()
+        for line in progress_lines(self, self.process, self.process.stderr):
             if not line and self.process.poll() is not None:
                 break
             if not line:
@@ -91,16 +95,11 @@ class SceneDetectionWorker(QThread):
                     pct = int(min(99, (cur_sec / duration_sec) * 100))
                     self.progress.emit(pct)
 
-        if self.cancel_requested:
-            if self.process and self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-            return
-
         self.process.wait()
+        if self.cancel_requested:
+            return
+        if self.process.returncode != 0:
+            raise RuntimeError('FFmpeg scene detection failed')
         self.finished.emit(scenes, frame_count, fps)
 
     def _run_opencv(self, fps, frame_count):
@@ -139,7 +138,8 @@ class SceneDetectionWorker(QThread):
             self.finished.emit(scenes, frame_count, fps)
 
 
-class SceneActionWorker(QThread):
+class SceneActionWorker(ManagedWorker):
+    result_format = ResultFormat.SIMPLE
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, str)
 
@@ -156,7 +156,7 @@ class SceneActionWorker(QThread):
         self.frame_count = frame_count
         self.cancel_requested = False
 
-    def run(self):
+    def _run(self):
         if self.action == "keyframes":
             self._extract_keyframes()
         elif self.action == "clips":
@@ -181,7 +181,14 @@ class SceneActionWorker(QThread):
                 ts = round((frame_num / self.fps) * 1000) if self.fps else 0
                 filename = self.format_cb(frame_num, ts, self.extension)
                 path = self.path_cb(self.save_dir, f"scene_{i+1}_{filename}", used_names)
-                cv2.imwrite(path, image)
+                if not cv2.imwrite(path, image):
+                    cap.release()
+                    raise OSError(f"Could not save: {path}")
+                self.output_paths.append(path)
+
+            else:
+                cap.release()
+                raise OSError(f"Could not read scene frame {frame_num}")
 
             pct = int((i + 1) / len(self.scenes) * 100)
             self.progress.emit(pct, f"Extracted scene keyframe {i+1} of {len(self.scenes)}")
@@ -250,13 +257,18 @@ class SceneActionWorker(QThread):
                 "-avoid_negative_ts", "make_zero", out_path
             ]
             try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                res = run_cancellable(self, cmd)
             except subprocess.TimeoutExpired:
+                if os.path.exists(out_path):
+                    remove_file(out_path)
                 errors.append(f"Clip {i+1}: Extraction timed out.")
                 continue
             if res.returncode == 0 and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
                 split_count += 1
+                self.output_paths.append(out_path)
             else:
+                if os.path.exists(out_path):
+                    remove_file(out_path)
                 err_msg = res.stderr.strip() if res.stderr else "Unknown FFmpeg error"
                 errors.append(f"Clip {i+1}: {err_msg}")
 
@@ -270,6 +282,6 @@ class SceneActionWorker(QThread):
         if split_count == 0 and errors:
             self.finished.emit(False, f"Failed to split clips: {errors[0]}")
         elif errors:
-            self.finished.emit(True, f"Extracted {split_count} clips with {len(errors)} warnings.")
+            self.finished.emit(False, f"Extracted {split_count} clips with {len(errors)} warnings.")
         else:
             self.finished.emit(True, f"Successfully split {split_count} clips.")

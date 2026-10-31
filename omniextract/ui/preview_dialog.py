@@ -28,6 +28,14 @@ from ..media.subtitles import extract_subtitles_to_temp, parse_subtitles
 from ..utils.timestamps import format_timestamp
 
 
+def image_output_path(path, selected_filter):
+    extensions = ('.jpg', '.jpeg') if selected_filter.startswith('JPEG') else ('.tif', '.tiff') if selected_filter.startswith('TIFF') else ('.png',)
+    if path.lower().endswith(extensions):
+        return path
+    stem, ext = os.path.splitext(path)
+    return (stem if ext.lower() in ('.png', '.jpg', '.jpeg', '.tif', '.tiff') else path) + extensions[0]
+
+
 class SubtitleVideoWidget(QGraphicsView):
     """Video widget supporting subtitle overlays via QGraphicsView."""
 
@@ -209,6 +217,8 @@ class VideoPreviewDialog(QDialog):
         self.initial_sub_index = initial_sub_index
         self.subtitles_data = []
         self._temp_extracted_srt = None
+        self._external_track_index = None
+        self._external_track_path = None
         self._slider_dragging = False
         self._last_scrub_seek = 0.0
 
@@ -364,6 +374,9 @@ class VideoPreviewDialog(QDialog):
         self._max_cue_duration = max((item[1] - item[0] for item in self.subtitles_data), default=0)
 
     def _on_subtitle_track_changed(self, index):
+        if self._temp_extracted_srt and os.path.exists(self._temp_extracted_srt):
+            os.remove(self._temp_extracted_srt)
+            self._temp_extracted_srt = None
         if index == self.sub_combo.count() - 1:
             file_path, _ = QFileDialog.getOpenFileName(
                 self, "Select Subtitle File",
@@ -374,12 +387,22 @@ class VideoPreviewDialog(QDialog):
                 self._set_subtitles_data(parse_subtitles(file_path))
                 lbl = f"External: {os.path.basename(file_path)}"
                 self.sub_combo.blockSignals(True)
-                self.sub_combo.setItemText(index, f"Sub: {lbl}")
+                if self._external_track_index is None:
+                    self.sub_combo.insertItem(index, f'Sub: {lbl}')
+                    self._external_track_index = index
+                else:
+                    self.sub_combo.setItemText(self._external_track_index, f'Sub: {lbl}')
+                self._external_track_path = file_path
+                self.sub_combo.setCurrentIndex(self._external_track_index)
                 self.sub_combo.blockSignals(False)
             else:
                 self.sub_combo.setCurrentIndex(0)
             return
 
+        if index == self._external_track_index:
+            self._set_subtitles_data(parse_subtitles(self._external_track_path))
+            self._refresh_subtitle_at(self.media_player.position())
+            return
         if index <= 0 or index > len(self.subtitle_tracks):
             self._set_subtitles_data([])
             self.video_widget.set_subtitle("")
@@ -389,6 +412,9 @@ class VideoPreviewDialog(QDialog):
         if track.get("type") == "external":
             self._set_subtitles_data(parse_subtitles(track["path"]))
         else:
+            if self._temp_extracted_srt and os.path.exists(self._temp_extracted_srt):
+                os.remove(self._temp_extracted_srt)
+                self._temp_extracted_srt = None
             si = track["sub_index"]
             temp_ext = extract_subtitles_to_temp(self.video_path, si)
             if temp_ext:
@@ -523,13 +549,7 @@ class VideoPreviewDialog(QDialog):
         if not path:
             return
 
-        lower = path.lower()
-        if selected_filter.startswith("JPEG") and not lower.endswith((".jpg", ".jpeg")):
-            path += ".jpg"
-        elif selected_filter.startswith("TIFF") and not lower.endswith((".tif", ".tiff")):
-            path += ".tiff"
-        elif not lower.endswith(".png"):
-            path += ".png"
+        path = image_output_path(path, selected_filter)
 
         try:
             cmd = [
@@ -548,9 +568,11 @@ class VideoPreviewDialog(QDialog):
         self.media_player.stop()
         if hasattr(self, "thumb_worker") and self.thumb_worker.isRunning():
             self.thumb_worker.cancel()
-            if not self.thumb_worker.wait(1500):
-                self.thumb_worker.terminate()
-                self.thumb_worker.wait(500)
+            if not self.thumb_worker.wait(20):
+                from PyQt6.QtCore import QTimer
+                event.ignore()
+                QTimer.singleShot(50, self.close)
+                return
         if self._temp_extracted_srt and os.path.exists(self._temp_extracted_srt):
             try: os.remove(self._temp_extracted_srt)
             except OSError: pass

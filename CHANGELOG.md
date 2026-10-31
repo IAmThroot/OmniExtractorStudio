@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-31
+
+### Fixed
+- Custom FPS extraction, preview JPEG/TIFF extensions, and temporary subtitle cleanup.
+- Lossless RIFE queue backpressure, encoder error propagation, and orderly pipeline shutdown.
+- Accurate frame manifests and output counts; motion and segment exports now validate encoder results.
+- Stale metadata responses and processing against unavailable source metadata.
+- Shared processing lifecycle, safe worker ownership, cooperative cancellation, and application shutdown.
+- Cleanup permission failures preserve job outcomes and original encoder errors; worker subclasses inherit explicit result formats.
+- Independent queued settings and subtitle identities; batches continue after failures and summarize outcomes.
+- Pitch-preserving audio retiming for conform playback, including extreme speed ratios.
+- Legacy preset defaults, built-in motion presets, and supported RIFE ONNX descriptions.
+
+### Maintenance
+- Added worker, UI state, and real FFmpeg regression coverage.
+- Unified Linux packaging and verified release tag/version consistency.
+
 ## [1.3.0] - 2026-10-16
 
 ### Added & Optimized

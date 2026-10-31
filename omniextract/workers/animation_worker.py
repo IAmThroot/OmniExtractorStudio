@@ -1,3 +1,6 @@
+from ..media.process import remove_file
+from ..media.process import run_cancellable
+from .base import ManagedWorker, ResultFormat
 import os
 import shutil
 import subprocess
@@ -7,7 +10,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from ..utils.timestamps import format_timestamp
 
 
-class AnimatedExportWorker(QThread):
+class AnimatedExportWorker(ManagedWorker):
+    result_format = ResultFormat.FILE
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, bool, str, str)
 
@@ -29,7 +33,7 @@ class AnimatedExportWorker(QThread):
         self.cancel_requested = False
         self.process = None
 
-    def run(self):
+    def _run(self):
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             self.finished.emit(False, False, "", "FFmpeg not found on PATH.")
@@ -47,7 +51,10 @@ class AnimatedExportWorker(QThread):
         sub_prefix = f"{self.subtitle_filter}," if self.subtitle_filter else ""
 
         if self.output_format == "GIF":
-            self._export_gif(ffmpeg, start_sec, dur_sec, duration_ms, scale_filter, sub_prefix)
+            try:
+                self._export_gif(ffmpeg, start_sec, dur_sec, duration_ms, scale_filter, sub_prefix)
+            finally:
+                self._cleanup(self.output_path + ".palette.png")
         else:
             self._export_webp(ffmpeg, start_sec, dur_sec, duration_ms, scale_filter, sub_prefix)
 
@@ -64,7 +71,7 @@ class AnimatedExportWorker(QThread):
         ]
 
         try:
-            result = subprocess.run(palette_cmd, capture_output=True, text=True, timeout=120)
+            result = run_cancellable(self, palette_cmd)
             if result.returncode != 0 or not os.path.isfile(palette_path):
                 self.finished.emit(False, False, "", f"Palette generation failed: {result.stderr}")
                 return
@@ -123,70 +130,15 @@ class AnimatedExportWorker(QThread):
                 pass
 
     def _run_ffmpeg_with_progress(self, cmd, duration_ms, base_pct):
-        import tempfile
-        stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
-        try:
-            self.process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=stderr_file,
-                text=True, bufsize=1
-            )
-        except Exception as e:
-            stderr_file.close()
-            self.finished.emit(False, False, "", str(e))
-            return
-
-        while self.process.poll() is None:
-            line = self.process.stdout.readline()
-            if line:
-                line = line.strip()
-                if line.startswith("out_time_us="):
-                    try:
-                        out_us = int(line.split("=", 1)[1])
-                        out_ms = out_us // 1000
-                        pct = base_pct + int(min(100 - base_pct, (out_ms / max(1, duration_ms)) * (100 - base_pct)))
-                        self.progress.emit(pct, f"Encoding: {format_timestamp(out_ms)} / {format_timestamp(duration_ms)}")
-                    except (ValueError, ZeroDivisionError):
-                        pass
-
-            if self.cancel_requested:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait()
-                stderr_file.close()
-                if os.path.isfile(self.output_path):
-                    try:
-                        os.remove(self.output_path)
-                    except OSError:
-                        pass
-                self.finished.emit(False, True, "", "Cancelled")
-                return
-
-        try:
-            self.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait()
-        try:
-            stderr_file.seek(0)
-            stderr_output = stderr_file.read().strip()
-        except Exception:
-            stderr_output = ""
-        finally:
-            stderr_file.close()
-
-        if self.process.returncode == 0 and os.path.isfile(self.output_path) and os.path.getsize(self.output_path) > 0:
-            size_kb = os.path.getsize(self.output_path) / 1024
-            self.finished.emit(True, False, self.output_path, f"Output size: {size_kb:.1f} KB")
-        else:
-            self.finished.emit(False, False, "", stderr_output or "Export failed.")
+        from .clip_worker import extract
+        success, error = extract(self, cmd, duration_ms, self.output_path, self.progress.emit)
+        self.finished.emit(success, self.cancel_requested, self.output_path,
+                           'Animation saved.' if success else error or 'Export failed')
 
     def _cleanup(self, *paths):
         for p in paths:
             try:
                 if os.path.isfile(p):
-                    os.remove(p)
+                    remove_file(p)
             except OSError:
                 pass

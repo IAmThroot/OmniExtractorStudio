@@ -1,3 +1,4 @@
+from ..media.process import run_cancellable
 import json
 import os
 import shutil
@@ -8,7 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from ..media.metadata import probe_video_metadata
 
 
-def probe_subtitle_tracks_for_video(video_path, external_subtitle_file=""):
+def probe_subtitle_tracks_for_video(video_path, external_subtitle_file="", owner=None):
     """Probe embedded and external subtitle tracks for a video without GUI dependencies."""
     subtitle_tracks = []
     if video_path and os.path.isfile(video_path):
@@ -34,7 +35,8 @@ def probe_subtitle_tracks_for_video(video_path, external_subtitle_file=""):
     ffprobe = shutil.which("ffprobe")
     if ffprobe and video_path and os.path.isfile(video_path):
         try:
-            result = subprocess.run(
+            runner = subprocess.run if owner is None else lambda cmd, **kw: run_cancellable(owner, cmd, timeout=10)
+            result = runner(
                 [ffprobe, "-v", "error", "-select_streams", "s",
                  "-show_entries", "stream=index,codec_name:stream_tags=language,title",
                  "-of", "json", video_path],
@@ -77,8 +79,12 @@ class MetadataProbeWorker(QThread):
 
     def __init__(self, video_path, external_subtitle_file=""):
         super().__init__()
+        self.cancel_requested = False
         self.video_path = video_path
         self.external_subtitle_file = external_subtitle_file
+
+    def cancel(self):
+        self.cancel_requested = True
 
     def run(self):
         if not self.video_path or not os.path.isfile(self.video_path):
@@ -86,14 +92,16 @@ class MetadataProbeWorker(QThread):
             return
 
         try:
-            metadata = probe_video_metadata(self.video_path)
+            metadata = probe_video_metadata(self.video_path, owner=self)
             if not metadata:
                 self.error.emit(self.video_path, "Could not open video metadata.")
                 return
 
             tracks, external_sub = probe_subtitle_tracks_for_video(
-                self.video_path, self.external_subtitle_file
+                self.video_path, self.external_subtitle_file, owner=self
             )
+            if self.cancel_requested:
+                return
             self.metadata_ready.emit(self.video_path, metadata, tracks, external_sub)
         except Exception as exc:
             self.error.emit(self.video_path, str(exc))

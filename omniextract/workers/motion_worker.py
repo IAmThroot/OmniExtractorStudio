@@ -1,3 +1,7 @@
+from ..media.process import remove_file
+import os
+from ..media.process import run_cancellable
+from .base import ManagedWorker, ResultFormat
 import math
 import shutil
 import subprocess
@@ -10,7 +14,8 @@ from ..utils.resources import get_resource_path
 from ..utils.timestamps import format_timestamp
 
 
-class MotionExtractionWorker(QThread):
+class MotionExtractionWorker(ManagedWorker):
+    result_format = ResultFormat.COUNTED
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, int, str)
 
@@ -32,13 +37,25 @@ class MotionExtractionWorker(QThread):
     def cancel(self):
         self.cancel_requested = True
 
-    def run(self):
+    def _run(self):
+        self._cap = None
+        self._detector = None
+        try:
+            self._process()
+        finally:
+            if self._cap is not None:
+                self._cap.release()
+            if self._detector is not None:
+                self._detector.close()
+
+    def _process(self):
         cap = cv2.VideoCapture(self.source_file)
         if not cap.isOpened():
             cap.release()
             self.finished.emit(False, 0, "Could not open source file.")
             return
 
+        self._cap = cap
         fps = cap.get(cv2.CAP_PROP_FPS)
         if not fps or not math.isfinite(fps) or fps <= 0:
             fps = 30.0
@@ -53,6 +70,7 @@ class MotionExtractionWorker(QThread):
                 from ..ai.detector import YOLOPresenceDetector
                 model_path = get_resource_path("assets/models/yolov8n.onnx")
                 yolo_detector = YOLOPresenceDetector(model_path)
+                self._detector = yolo_detector
             except Exception as exc:
                 cap.release()
                 self.finished.emit(False, 0, f"Failed to load YOLO model: {exc}")
@@ -121,7 +139,9 @@ class MotionExtractionWorker(QThread):
                     if self.mode == "Keyframes":
                         filename = self.format_cb(current_frame, current_ms, self.extension)
                         path = self.path_cb(self.save_dir, "motion_" + filename, used_names)
-                        cv2.imwrite(path, frame)
+                        if not cv2.imwrite(path, frame):
+                            raise OSError(f"Could not save: {path}")
+                        self.output_paths.append(path)
                         extracted_count += 1
 
                 last_motion_time = current_ms
@@ -167,6 +187,7 @@ class MotionExtractionWorker(QThread):
             profile = get_hwaccel_encode_profile(preset="fast", crf=18)
             enc_args = profile.get("video_args", ["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
 
+            extracted_count = 0
             for i, (start_ms, end_ms) in enumerate(motion_intervals):
                 if self.cancel_requested:
                     break
@@ -186,11 +207,21 @@ class MotionExtractionWorker(QThread):
                 ]
 
                 try:
-                    subprocess.run(cmd, capture_output=True, timeout=120)
+                    result = run_cancellable(self, cmd)
+                    if self.cancel_requested or result.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
+                        if os.path.exists(out_path):
+                            remove_file(out_path)
+                        self.finished.emit(False, extracted_count, 'Cancelled' if self.cancel_requested else result.stderr or 'Clip export failed')
+                        return
+                    self.output_paths.append(out_path)
+                    extracted_count += 1
                 except subprocess.TimeoutExpired:
-                    pass
+                    if os.path.exists(out_path):
+                        remove_file(out_path)
+                    self.finished.emit(False, extracted_count, 'Clip export timed out')
+                    return
 
         if yolo_detector:
             yolo_detector.close()
 
-        self.finished.emit(True, extracted_count, "Success")
+        self.finished.emit(not self.cancel_requested, extracted_count, "Cancelled" if self.cancel_requested else "Success")

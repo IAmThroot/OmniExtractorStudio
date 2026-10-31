@@ -1,87 +1,59 @@
+from ..media.process import remove_file
 import os
 import subprocess
-
-from PyQt6.QtCore import QThread, pyqtSignal
-
+from PyQt6.QtCore import pyqtSignal
+from .base import ManagedWorker, ResultFormat
+from ..media.process import close_stream, progress_lines, stop_process
 from ..utils.timestamps import format_timestamp
 
 
-class ClipExtractionWorker(QThread):
+def extract(owner, cmd, duration, path, progress):
+    owner.process = None
+    success = False
+    try:
+        owner.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        errors = []
+        for line in progress_lines(owner, owner.process):
+            if line.startswith('out_time_ms='):
+                try:
+                    ms = int(line.split('=', 1)[1]) // 1000
+                    progress(min(99, int(ms * 100 / max(1, duration))), format_timestamp(ms))
+                except ValueError:
+                    pass
+            elif '=' not in line:
+                errors.append(line.strip())
+                errors = errors[-30:]
+        owner.process.wait()
+        success = not owner.cancel_requested and owner.process.returncode == 0 and os.path.isfile(path) and os.path.getsize(path) > 0
+        return success, '\n'.join(errors)
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        stop_process(owner.process)
+        if owner.process and owner.process.stdout:
+            close_stream(owner.process.stdout)
+        if owner.process is not None and not success:
+            if os.path.isfile(path):
+                remove_file(path)
+
+
+class ClipExtractionWorker(ManagedWorker):
+    result_format = ResultFormat.FILE
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, bool, str, str)
 
     def __init__(self, cmd, duration_ms, clip_path):
         super().__init__()
-        self.cmd = cmd
-        self.duration_ms = duration_ms
-        self.clip_path = clip_path
+        self.cmd, self.duration_ms, self.clip_path = cmd, duration_ms, clip_path
         self.cancel_requested = False
 
-    def run(self):
-        process = None
-        ffmpeg_error = ""
-
-        try:
-            process = subprocess.Popen(
-                self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1
-            )
-            while process.poll() is None:
-                line = process.stdout.readline()
-                if line:
-                    line = line.strip()
-                    if line.startswith("out_time_ms="):
-                        try:
-                            out_ms = int(line.split("=", 1)[1]) // 1000
-                            pct = int(min(99, out_ms * 100 / self.duration_ms))
-                            self.progress.emit(pct, f"Extracting: {format_timestamp(out_ms)} / {format_timestamp(self.duration_ms)}")
-                        except (ValueError, ZeroDivisionError):
-                            pass
-
-                if self.cancel_requested:
-                    if process is not None:
-                        process.terminate()
-                        try:
-                            process.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            process.wait()
-                    break
-
-            if process is not None:
-                try:
-                    process.communicate(timeout=15)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=3)
-        except Exception as exc:
-            ffmpeg_error = str(exc)
-            if process is not None and process.poll() is None:
-                process.kill()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-
-        if self.cancel_requested:
-            if os.path.isfile(self.clip_path):
-                try:
-                    os.remove(self.clip_path)
-                except OSError:
-                    pass
-            self.finished.emit(False, True, self.clip_path, "Cancelled")
-            return
-
-        success = (
-            process is not None
-            and process.returncode == 0
-            and os.path.isfile(self.clip_path)
-            and os.path.getsize(self.clip_path) > 0
-        )
-        self.finished.emit(success, False, self.clip_path, ffmpeg_error)
+    def _run(self):
+        success, error = extract(self, self.cmd, self.duration_ms, self.clip_path, self.progress.emit)
+        self.finished.emit(success, self.cancel_requested, self.clip_path, error)
 
 
-class MultiSegmentWorker(QThread):
+class MultiSegmentWorker(ManagedWorker):
+    result_format = ResultFormat.SEGMENTS
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, int, list, str)
 
@@ -89,108 +61,22 @@ class MultiSegmentWorker(QThread):
         super().__init__()
         self.tasks = tasks
         self.cancel_requested = False
-        self.process = None
 
-    def run(self):
-        total_tasks = len(self.tasks)
-        if total_tasks == 0:
-            self.finished.emit(True, 0, [], "No segments to extract.")
-            return
-
-        extracted_paths = []
-        total_duration_ms = sum(t["duration_ms"] for t in self.tasks) or 1
-        accumulated_ms = 0
-
-        for i, task in enumerate(self.tasks):
-            if self.cancel_requested:
-                break
-
-            cmd = task["cmd"]
-            duration_ms = task["duration_ms"]
-            out_path = task["output_path"]
-            name = task.get("name", f"Segment {i + 1}")
-
-            self.progress.emit(
-                int((i / total_tasks) * 100),
-                f"[{i + 1}/{total_tasks}] {name}..."
-            )
-
-            try:
-                self.process = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1
-                )
-                while self.process.poll() is None:
-                    line = self.process.stdout.readline()
-                    if line:
-                        line = line.strip()
-                        if line.startswith("out_time_ms="):
-                            try:
-                                seg_out_ms = int(line.split("=", 1)[1]) // 1000
-                                current_total_ms = accumulated_ms + seg_out_ms
-                                pct = int(min(99, (current_total_ms / total_duration_ms) * 100))
-                                self.progress.emit(pct, f"[{i + 1}/{total_tasks}] {name} ({format_timestamp(seg_out_ms)} / {format_timestamp(duration_ms)})")
-                            except (ValueError, ZeroDivisionError):
-                                pass
-
-                    if self.cancel_requested:
-                        self.process.terminate()
-                        try:
-                            self.process.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            self.process.kill()
-                            try:
-                                self.process.wait(timeout=3)
-                            except subprocess.TimeoutExpired:
-                                pass
-                        break
-
-                try:
-                    self.process.communicate(timeout=15)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    try:
-                        self.process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        pass
-            except Exception as exc:
-                if self.process is not None and self.process.poll() is None:
-                    self.process.kill()
-                    try:
-                        self.process.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        pass
-                self._cleanup_temp_srts()
-                self.finished.emit(False, len(extracted_paths), extracted_paths, str(exc))
-                return
-
-            if task.get("temp_srt") and os.path.exists(task["temp_srt"]):
-                try: os.remove(task["temp_srt"])
-                except OSError: pass
-
-            if self.cancel_requested:
-                if os.path.exists(out_path):
-                    try: os.remove(out_path)
-                    except OSError: pass
-                break
-
-            if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
-                extracted_paths.append(out_path)
-                accumulated_ms += duration_ms
-            else:
-                self._cleanup_temp_srts()
-                self.finished.emit(False, len(extracted_paths), extracted_paths, f"Failed to extract segment: {name}")
-                return
-
-        self._cleanup_temp_srts()
-        if self.cancel_requested:
-            self.finished.emit(False, len(extracted_paths), extracted_paths, "Cancelled")
-        else:
-            self.progress.emit(100, f"Completed {len(extracted_paths)} segments!")
-            self.finished.emit(True, len(extracted_paths), extracted_paths, f"Successfully extracted {len(extracted_paths)} segments.")
-
-    def _cleanup_temp_srts(self):
-        for task in self.tasks:
-            if task.get("temp_srt") and os.path.exists(task["temp_srt"]):
-                try: os.remove(task["temp_srt"])
-                except OSError: pass
+    def _run(self):
+        paths = []
+        try:
+            for i, task in enumerate(self.tasks):
+                if self.cancel_requested:
+                    break
+                success, error = extract(self, task['cmd'], task['duration_ms'], task['output_path'],
+                    lambda pct, label: self.progress.emit(int((i + pct / 100) * 100 / len(self.tasks)), label))
+                if not success:
+                    self.finished.emit(False, len(paths), paths, error or 'Cancelled' if self.cancel_requested else error or 'Segment extraction failed')
+                    return
+                paths.append(task['output_path'])
+                self.output_paths.append(task['output_path'])
+            self.finished.emit(not self.cancel_requested, len(paths), paths, 'Cancelled' if self.cancel_requested else 'Segments extracted.')
+        finally:
+            for task in self.tasks:
+                if task.get('temp_srt'):
+                    remove_file(task['temp_srt'])

@@ -13,6 +13,9 @@ $PYI_BIN --noconfirm --onedir --windowed --name "OmniExtract" \
     --add-data "assets:assets" \
     extractor.py
 
+echo "==> Checking packaged application startup..."
+QT_QPA_PLATFORM=offscreen timeout 60 dist/OmniExtract/OmniExtract --smoke-test
+
 if [ ! -f "appimagetool" ]; then
     echo "==> Downloading appimagetool..."
     wget -q -O appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"

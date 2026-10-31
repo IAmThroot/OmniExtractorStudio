@@ -1,3 +1,5 @@
+import copy
+from functools import wraps
 import gc
 import os
 import re
@@ -5,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from PyQt6.QtCore import QSettings, Qt, QTime, QTimer, QUrl
+from PyQt6.QtCore import QSettings, Qt, QTime, QTimer, QUrl, QSignalBlocker, QThread
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -36,6 +38,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..workers.base import JobOutcome, JobStatus
 from .. import __version__
 from ..media.metadata import (
     probe_video_chapters,
@@ -76,10 +79,6 @@ from ..ai.rife import (
     get_model_status_info,
     RIFE_ONNX_URL,
     RIFE_REPO_URL,
-    FLOWNET_PKL_URL,
-    FILM_NET_SAFETENSORS_URL,
-    RIFE_PRACTICAL_URL,
-    COMFY_FRAME_INTERP_URL,
 )
 from .components.drop_line_edit import DropLineEdit
 from .metadata_dialog import (
@@ -96,7 +95,15 @@ class OmniExtractStudio(QWidget):
         self.settings = QSettings("Throot", "OmniExtractStudio")
         self.extracting = False
         self.cancel_requested = False
-        self.batch_queue = []
+        self.job_state = "idle"
+        self._active_worker = None
+        self._live_workers = set()
+        self._closing = False
+        self._probe_generation = 0
+        self._probes = set()
+        self.in_batch_mode = False
+        self._dispatching_batch = False
+        self.batch_results = []
         self.last_extracted_paths = []
         self.source_file = ""
         self.save_dir = ""
@@ -111,8 +118,88 @@ class OmniExtractStudio(QWidget):
         self.scene_worker = None
         self.initUI()
         self.load_settings()
+        self._refresh_job_controls()
 
         self.setAcceptDrops(True)
+
+    def _message(self, kind, title, text):
+        if self._closing:
+            return
+        if self.in_batch_mode:
+            if kind in ('critical', 'warning'):
+                self._batch_error = text
+            return
+        return getattr(QMessageBox, kind)(self, title, text)
+
+    def _filename_renderer(self):
+        template = self.filename_template_edit.text()
+        return lambda number, timestamp, extension: util_render_filename(template, number, timestamp, extension)
+
+    def _connect_worker_result(self, worker, callback):
+        worker._ui_callbacks = getattr(worker, '_ui_callbacks', []) + [callback]
+
+    def _start_worker(self, worker):
+        if self._active_worker is not None:
+            raise RuntimeError('A processing job is already running')
+        self._active_worker = worker
+        self._live_workers.add(worker)
+        self.job_state = 'running'
+        self.cancel_requested = False
+        worker.native_finished().connect(lambda: self._worker_done(worker))
+        self._refresh_job_controls()
+        worker.start()
+
+    def _worker_done(self, worker):
+        self._live_workers.discard(worker)
+        if self._active_worker is worker:
+            self._active_worker = None
+        self.job_state = 'completed'
+        outcome = worker.outcome
+        self.last_extracted_paths = list(outcome.paths)
+        self.set_extracting_state(False)
+        if not self._closing:
+            if worker.result_args is not None:
+                for callback in getattr(worker, '_ui_callbacks', []):
+                    try:
+                        callback(*worker.result_args)
+                    except Exception as exc:
+                        outcome = JobOutcome(JobStatus.FAILED, error=str(exc))
+            if getattr(self, '_batch_error', '') and self.in_batch_mode:
+                outcome = JobOutcome(JobStatus.FAILED, outcome.count, outcome.paths, self._batch_error)
+            if outcome.status == JobStatus.FAILED:
+                self.progress_label.setText('Failed: ' + outcome.error)
+                self._message('critical', 'Processing Failed', outcome.error)
+            self._refresh_job_controls()
+            if self.in_batch_mode:
+                self.batch_results.append((self._batch_job['path'], outcome))
+                if outcome.status == JobStatus.CANCELLED:
+                    self.cancel_requested = True
+                QTimer.singleShot(0, self.process_next_batch_item)
+        for attr in ('frame_worker', 'clip_worker', 'motion_worker', 'gif_worker', 'interp_worker',
+                     'conv_worker', 'multi_segment_worker', 'scene_worker', 'scene_action_worker'):
+            if getattr(self, attr, None) is worker:
+                setattr(self, attr, None)
+        worker.deleteLater()
+
+    def _refresh_job_controls(self):
+        busy = self._active_worker is not None or self.in_batch_mode or self._closing
+        ready = bool(self.current_metadata)
+        for name in ('extract_button', 'clip_extract_button', 'extract_segments_btn',
+                     'motion_extract_button', 'gif_export_button', 'conv_start_btn', 'interp_start_btn',
+                     'scene_detect_button', 'frame_queue_button', 'clip_queue_button', 'gif_queue_button',
+                     'conv_queue_btn', 'interp_queue_btn'):
+            button = getattr(self, name, None)
+            if button:
+                button.setEnabled(ready and not busy)
+        for name in ('source_file_button', 'save_dir_button', 'batch_run_btn', 'preset_combo', 'source_file_edit', 'save_dir_edit'):
+            widget = getattr(self, name, None)
+            if widget:
+                widget.setEnabled(not busy)
+        for name in ('cancel_button', 'clip_cancel_button', 'motion_cancel_button', 'gif_cancel_button',
+                     'conv_cancel_btn', 'interp_cancel_btn'):
+            button = getattr(self, name, None)
+            if button:
+                button.setEnabled(self._active_worker is not None)
 
     def selectSaveDirFromDrop(self, path):
         """Handle folder drag and drop into save directory line edit."""
@@ -575,13 +662,8 @@ class OmniExtractStudio(QWidget):
         self.motion_tab.setLayout(layout)
         
     def _cancel_motion_extraction(self):
-        worker = getattr(self, "motion_worker", None)
-        if worker and worker.isRunning():
-            worker.cancel_requested = True
+        self.cancelExtraction()
 
-    # -----------------------------
-    # GIF / WebP Maker Tab
-    # -----------------------------
 
     def initGifWebpTab(self):
         layout = QVBoxLayout()
@@ -737,13 +819,8 @@ class OmniExtractStudio(QWidget):
             return 0
 
     def _cancel_gif_export(self):
-        worker = getattr(self, "gif_worker", None)
-        if worker and worker.isRunning():
-            worker.cancel_requested = True
+        self.cancelExtraction()
 
-    # -----------------------------
-    # FPS & Interpolation Tab
-    # -----------------------------
 
     def initInterpolationTab(self):
         layout = QVBoxLayout()
@@ -922,7 +999,7 @@ class OmniExtractStudio(QWidget):
         self.interp_engine_combo = QComboBox()
         self.interp_engine_combo.addItems([
             "FFmpeg Motion Interpolation (MCI)",
-            "AI Neural Interpolation (RIFE / FILM)",
+            "AI Neural Interpolation (RIFE ONNX)",
         ])
         self.interp_engine_combo.currentTextChanged.connect(self._on_interp_engine_changed)
         engine_layout.addRow("Engine:", self.interp_engine_combo)
@@ -1046,6 +1123,8 @@ class OmniExtractStudio(QWidget):
         self.interp_tab.setLayout(layout)
 
     def _on_conv_mode_changed(self, text):
+        if hasattr(self, 'conv_audio_combo'):
+            self.conv_audio_combo.setItemText(0, 'Keep Audio (Retimed AAC)' if 'Conform' in text else 'Keep Audio (Stream Copy)')
         if "Resample" in text:
             self.conv_mode_desc_label.setText(
                 "<i>Drops or duplicates frames to reach the target rate while preserving video playback speed and duration.</i>"
@@ -1056,7 +1135,7 @@ class OmniExtractStudio(QWidget):
             )
         elif "Conform" in text:
             self.conv_mode_desc_label.setText(
-                "<i>Re-interprets frame playback speed without dropping or duplicating any frames (speeds up or slows down footage).</i>"
+                "<i>Changes playback speed without dropping or duplicating frames. Kept audio is retimed with pitch preservation and encoded as AAC.</i>"
             )
 
     def _on_conv_preset_changed(self, text):
@@ -1106,7 +1185,7 @@ class OmniExtractStudio(QWidget):
     def _browse_rife_model(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Interpolation Model", "",
-            "Supported Models (*.onnx *.pkl *.safetensors);;ONNX Models (*.onnx);;Pickle Weights (*.pkl);;SafeTensors (*.safetensors);;All Files (*)"
+            "ONNX Models (*.onnx);;All Files (*)"
         )
         if path and os.path.isfile(path):
             self.custom_rife_path = path
@@ -1311,6 +1390,8 @@ class OmniExtractStudio(QWidget):
     # -----------------------------
 
     def load_video_path(self, path, async_probe=True):
+        if self._active_worker is not None or (self.in_batch_mode and not self._dispatching_batch):
+            return
         if not path or not os.path.isfile(path):
             return
         self.source_file = path
@@ -1345,16 +1426,24 @@ class OmniExtractStudio(QWidget):
         if not hasattr(self, "source_file") or not self.source_file or not os.path.isfile(self.source_file):
             return
 
+        self._probe_generation += 1
+        generation = self._probe_generation
+        self.current_metadata = None
+        self.subtitle_tracks = []
+        self.preview_button.setEnabled(False)
+        self.info_button.setEnabled(False)
+        self._populate_subtitle_combos()
+        self._refresh_job_controls()
+        for worker in list(self._probes):
+            worker.cancel()
         if async_probe:
-            if hasattr(self, "_probe_worker") and self._probe_worker and self._probe_worker.isRunning():
-                self._probe_worker.terminate()
-                self._probe_worker.wait(500)
-            self._probe_worker = MetadataProbeWorker(
-                self.source_file, getattr(self, "external_subtitle_file", "")
-            )
-            self._probe_worker.metadata_ready.connect(self._on_metadata_probed)
-            self._probe_worker.error.connect(self._on_metadata_probe_error)
-            self._probe_worker.start()
+            worker = MetadataProbeWorker(self.source_file, getattr(self, 'external_subtitle_file', ''))
+            self._probe_worker = worker
+            self._probes.add(worker)
+            worker.metadata_ready.connect(lambda *args: self._on_metadata_probed(*args) if generation == self._probe_generation and not self._closing else None)
+            worker.error.connect(lambda *args: self._on_metadata_probe_error(*args) if generation == self._probe_generation and not self._closing else None)
+            worker.finished.connect(lambda: (self._probes.discard(worker), worker.deleteLater()))
+            worker.start()
             return
 
         # Synchronous execution (for batch mode or explicit synchronous calls)
@@ -1368,10 +1457,14 @@ class OmniExtractStudio(QWidget):
         self._on_metadata_probed(self.source_file, metadata, tracks, external_sub)
 
     def _on_metadata_probe_error(self, video_path, err_msg):
+        if video_path != self.source_file:
+            return
+        self.current_metadata = None
+        self.subtitle_tracks = []
+        self._refresh_job_controls()
         self.preview_button.setEnabled(False)
         self.info_button.setEnabled(False)
-        QMessageBox.warning(
-            self, "Unable to Open Video",
+        self._message("warning", "Unable to Open Video",
             "The selected file could not be opened as a video."
         )
 
@@ -1423,6 +1516,7 @@ class OmniExtractStudio(QWidget):
             self._update_interp_target_fps()
 
         self._populate_subtitle_combos(select_external=bool(self.external_subtitle_file))
+        self._refresh_job_controls()
 
     @staticmethod
     def format_file_size(size):
@@ -1496,8 +1590,7 @@ class OmniExtractStudio(QWidget):
 
     def previewSourceFile(self):
         if not hasattr(self, "source_file"):
-            QMessageBox.warning(
-                self, "No Source File",
+            self._message("warning", "No Source File",
                 "Please select a source video first."
             )
             return
@@ -1604,36 +1697,15 @@ class OmniExtractStudio(QWidget):
         self.settings.setValue("remember_settings", "true")
 
     def closeEvent(self, event):
+        self._closing = True
         self.cancel_requested = True
-        self.extracting = False
-
-        workers = [
-            getattr(self, w, None)
-            for w in (
-                "frame_worker", "clip_worker", "scene_worker", "scene_action_worker",
-                "gif_worker", "motion_worker", "multi_segment_worker",
-                "interp_worker", "conv_worker", "_probe_worker"
-            )
-        ]
-        running = [w for w in workers if w and w.isRunning()]
-        for w in running:
-            if hasattr(w, "cancel"):
-                try:
-                    w.cancel()
-                except Exception:
-                    pass
-            else:
-                w.cancel_requested = True
-
-        for w in running:
-            if w.isRunning() and not w.wait(250):
-                # Worker did not stop cooperatively; force it down so the app can exit.
-                try:
-                    w.terminate()
-                    w.wait(500)
-                except Exception:
-                    pass
-
+        self.job_state = 'cancelling'
+        for worker in list(self._live_workers) + list(self._probes):
+            worker.cancel()
+        if any(w.isRunning() for w in self._live_workers | self._probes):
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
         self.save_settings()
         event.accept()
 
@@ -1661,7 +1733,9 @@ class OmniExtractStudio(QWidget):
         if mode == "Every 10 Frames":
             return 10
 
-        if mode.endswith(" FPS"):
+        if mode == "Custom FPS":
+            target_fps = self.custom_fps_spin.value()
+        elif mode.endswith(" FPS"):
             target_fps = float(mode.split()[0])
         else:
             target_fps = self.custom_fps_spin.value()
@@ -1679,17 +1753,14 @@ class OmniExtractStudio(QWidget):
         return util_unique_path(directory, filename, used)
 
     def cancelExtraction(self):
-        if self.extracting:
-            self.cancel_requested = True
-            for worker_attr in ("frame_worker", "clip_worker", "scene_worker", "scene_action_worker", "gif_worker", "motion_worker", "multi_segment_worker"):
-                worker = getattr(self, worker_attr, None)
-                if worker and worker.isRunning():
-                    worker.cancel_requested = True
-            self.progress_label.setText("Cancelling...")
+        self.cancel_requested = True
+        self.job_state = 'cancelling'
+        if self._active_worker:
+            self._active_worker.cancel()
+        self.progress_label.setText('Cancelling...')
 
     def set_extracting_state(self, active):
         self.extracting = active
-        self.cancel_requested = False
         self.extract_button.setEnabled(not active)
         self.cancel_button.setEnabled(active)
         self.clip_extract_button.setEnabled(not active)
@@ -1701,7 +1772,7 @@ class OmniExtractStudio(QWidget):
 
     def queueCurrentFrameJob(self):
         if not getattr(self, "source_file", None):
-            QMessageBox.warning(self, "No Video", "Please load a video first.")
+            self._message("warning", "No Video", "Please load a video first.")
             return
             
         state = self.gather_app_state(is_custom_job=True)
@@ -1717,15 +1788,12 @@ class OmniExtractStudio(QWidget):
         self.batch_list.addItem(item)
         
         # Add to legacy path queue as fallback just in case
-        if self.source_file not in self.batch_queue:
-            self.batch_queue.append(self.source_file)
             
-        QMessageBox.information(self, "Queued", f"Added {name} to Batch Queue with current frame settings.")
+        self._message("information", "Queued", f"Added {name} to Batch Queue with current frame settings.")
 
     def extractFrames(self):
-        if not hasattr(self, "source_file") or not hasattr(self, "save_dir"):
-            QMessageBox.warning(
-                self, "Missing Information",
+        if not self.source_file or not self.save_dir:
+            self._message("warning", "Missing Information",
                 "Please select a source file and save directory first."
             )
             return
@@ -1738,8 +1806,7 @@ class OmniExtractStudio(QWidget):
         extension = format_mapping.get(self.format_combo.currentText(), ".png")
 
         if not self.current_metadata:
-            QMessageBox.warning(
-                self, "Unable to Open Video",
+            self._message("warning", "Unable to Open Video",
                 "No video metadata available. Please reload the source file."
             )
             return
@@ -1748,8 +1815,7 @@ class OmniExtractStudio(QWidget):
         frame_count = self.current_metadata.get("RawFrames", 0)
 
         if not fps or fps <= 0 or frame_count <= 0:
-            QMessageBox.warning(
-                self, "Invalid Video",
+            self._message("warning", "Invalid Video",
                 "Could not determine the video's frame rate or frame count."
             )
             return
@@ -1762,8 +1828,7 @@ class OmniExtractStudio(QWidget):
             end_ms = qtime_to_ms(self.end_time_edit.time())
 
             if end_ms <= start_ms:
-                QMessageBox.warning(
-                    self, "Invalid Time Range",
+                self._message("warning", "Invalid Time Range",
                     "End Time must be greater than Start Time."
                 )
                 return
@@ -1796,7 +1861,7 @@ class OmniExtractStudio(QWidget):
         self.frame_worker = FrameExtractionWorker(
             self.source_file, self.save_dir, extension, 
             start_frame, end_frame, step, 
-            self.render_filename, self.unique_path,
+            self._filename_renderer(), self.unique_path,
             self.quality_spinbox.value(),
             self.export_manifest_checkbox.isChecked(),
             self.format_combo.currentText(),
@@ -1809,10 +1874,10 @@ class OmniExtractStudio(QWidget):
             lambda pct, ext, lbl: self._update_frame_progress(pct, lbl)
         )
         self.frame_worker.error.connect(
-            lambda msg: QMessageBox.warning(self, "Extraction Error", msg)
+            lambda msg: self._message("warning", "Extraction Error", msg)
         )
-        self.frame_worker.finished.connect(self._on_frame_extraction_finished)
-        self.frame_worker.start()
+        self._connect_worker_result(self.frame_worker, self._on_frame_extraction_finished)
+        self._start_worker(self.frame_worker)
 
     def _update_frame_progress(self, percent, label):
         self.progress_bar.setValue(percent)
@@ -1823,15 +1888,14 @@ class OmniExtractStudio(QWidget):
         self.open_output_button.setEnabled(True)
         self.contact_sheet_button.setEnabled(True)
         
-        if hasattr(self, "frame_worker") and self.frame_worker is not None:
-            self.frame_worker.deleteLater()
-            self.frame_worker = None
             
 
+        if self.frame_worker and self.frame_worker.outcome.status == JobStatus.FAILED:
+            self.progress_label.setText(f'Failed — {extracted:,} frames saved.')
+            return
         if cancelled:
             self.progress_label.setText(f"Cancelled — {extracted:,} frames saved.")
-            QMessageBox.information(
-                self, "Extraction Cancelled",
+            self._message("information", "Extraction Cancelled",
                 f"Extraction cancelled.\n\n{extracted:,} frames were saved before cancellation."
             )
             return
@@ -1846,8 +1910,7 @@ class OmniExtractStudio(QWidget):
             self.close()
             return
             
-        QMessageBox.information(
-            self, "Extraction Complete",
+        self._message("information", "Extraction Complete",
             f"Done!\n\nSuccessfully extracted {extracted:,} images.\nTime: {elapsed:.2f} seconds."
         )
 
@@ -1939,7 +2002,7 @@ class OmniExtractStudio(QWidget):
 
     def queueCurrentClipJob(self):
         if not getattr(self, "source_file", None):
-            QMessageBox.warning(self, "No Video", "Please load a video first.")
+            self._message("warning", "No Video", "Please load a video first.")
             return
             
         state = self.gather_app_state(is_custom_job=True)
@@ -1954,30 +2017,27 @@ class OmniExtractStudio(QWidget):
         })
         self.batch_list.addItem(item)
         
-        if self.source_file not in self.batch_queue:
-            self.batch_queue.append(self.source_file)
             
-        QMessageBox.information(self, "Queued", f"Added {name} to Batch Queue with current clip settings.")
+        self._message("information", "Queued", f"Added {name} to Batch Queue with current clip settings.")
 
     def extractClip(self):
         """Extract the selected range with FFmpeg and explicitly include source audio."""
-        if not hasattr(self, "source_file") or not hasattr(self, "save_dir"):
-            QMessageBox.warning(self, "Missing Information",
+        if not self.source_file or not self.save_dir:
+            self._message("warning", "Missing Information",
                                 "Please select a source file and save directory first.")
             return
 
         ffmpeg = shutil.which("ffmpeg")
         ffprobe = shutil.which("ffprobe")
         if not ffmpeg or not ffprobe:
-            QMessageBox.critical(
-                self, "FFmpeg/FFprobe Not Found",
+            self._message("critical", "FFmpeg/FFprobe Not Found",
                 "FFmpeg and FFprobe are required for clip extraction.\n\n"
                 "Check with: ffmpeg -version && ffprobe -version"
             )
             return
 
         if not self.current_metadata:
-            QMessageBox.warning(self, "Unable to Open Video",
+            self._message("warning", "Unable to Open Video",
                                 "No video metadata available. Please reload the source file.")
             return
         fps = self.current_metadata.get("RawFPS", 0)
@@ -1986,7 +2046,7 @@ class OmniExtractStudio(QWidget):
         start_frame = self.clip_start_frame_spinbox.value()
         end_frame = self.clip_end_frame_spinbox.value()
         if not fps or fps <= 0 or end_frame <= start_frame:
-            QMessageBox.warning(self, "Invalid Range",
+            self._message("warning", "Invalid Range",
                                 "Please choose a valid start/end frame range.")
             return
 
@@ -1994,7 +2054,7 @@ class OmniExtractStudio(QWidget):
             start_frame = max(0, min(start_frame, frame_count - 1))
             end_frame = max(start_frame + 1, min(end_frame, frame_count))
         if end_frame <= start_frame:
-            QMessageBox.warning(self, "Invalid Range", "The selected range is outside the video's frame range.")
+            self._message("warning", "Invalid Range", "The selected range is outside the video's frame range.")
             return
 
         selected_format = self.clip_format_combo.currentText().upper()
@@ -2012,7 +2072,7 @@ class OmniExtractStudio(QWidget):
             [ffprobe, "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=index,codec_name,sample_rate,channels",
              "-of", "default=noprint_wrappers=1", self.source_file],
-            capture_output=True, text=True
+            capture_output=True, text=True, timeout=10
         )
         source_audio_info = probe.stdout.strip()
         has_audio = bool(source_audio_info)
@@ -2116,10 +2176,10 @@ class OmniExtractStudio(QWidget):
         self.clip_worker.progress.connect(
             lambda pct, lbl: self._update_clip_progress(pct, lbl)
         )
-        self.clip_worker.finished.connect(
+        self._connect_worker_result(self.clip_worker,
             lambda s, c, p, e: self._on_clip_extraction_finished(s, c, p, e, duration_ms, has_audio, ffprobe, source_audio_info)
         )
-        self.clip_worker.start()
+        self._start_worker(self.clip_worker)
 
     def _update_clip_progress(self, percent, label):
         self.clip_progress_bar.setValue(percent)
@@ -2133,9 +2193,6 @@ class OmniExtractStudio(QWidget):
             except OSError: pass
             self._clip_temp_srt = None
             
-        if hasattr(self, "clip_worker") and self.clip_worker is not None:
-            self.clip_worker.deleteLater()
-            self.clip_worker = None
             
 
         if cancelled:
@@ -2143,7 +2200,7 @@ class OmniExtractStudio(QWidget):
                 try: os.remove(clip_path)
                 except OSError: pass
             self.clip_progress_bar.setValue(0)
-            QMessageBox.information(self, "Clip Extraction Cancelled",
+            self._message("information", "Clip Extraction Cancelled",
                                     "Clip extraction was cancelled and the partial file was removed.")
             return
 
@@ -2152,7 +2209,7 @@ class OmniExtractStudio(QWidget):
                 try: os.remove(clip_path)
                 except OSError: pass
             self.clip_progress_bar.setValue(0)
-            QMessageBox.critical(self, "FFmpeg Error",
+            self._message("critical", "FFmpeg Error",
                                  "FFmpeg could not create the clip.\n\n" + (error_msg or "No additional error."))
             return
 
@@ -2162,7 +2219,7 @@ class OmniExtractStudio(QWidget):
             [ffprobe, "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=codec_name,profile,sample_rate,channels",
              "-of", "default=noprint_wrappers=1", clip_path],
-            capture_output=True, text=True
+            capture_output=True, text=True, timeout=10
         )
         final_audio_info = verify.stdout.strip()
         final_has_audio = bool(final_audio_info)
@@ -2171,8 +2228,7 @@ class OmniExtractStudio(QWidget):
             try: os.remove(clip_path)
             except OSError: pass
             self.clip_progress_bar.setValue(0)
-            QMessageBox.critical(
-                self, "Audio Stream Missing",
+            self._message("critical", "Audio Stream Missing",
                 "The source video contains an audio stream, but FFmpeg produced a clip without one.\n\n"
                 "The output was deleted so a silent clip cannot be mistaken for a successful extraction.\n\n"
                 f"FFmpeg error: {error_msg or 'none'}\n\n"
@@ -2187,8 +2243,7 @@ class OmniExtractStudio(QWidget):
             return
             
         audio_status = "Included" if final_has_audio else "None in source"
-        QMessageBox.information(
-            self, "Clip Extraction Complete",
+        self._message("information", "Clip Extraction Complete",
             f"Done!\n\nClip duration: {format_timestamp(duration_ms)}\n"
             f"Audio: {audio_status}\n\n"
             f"Saved to:\n{clip_path}"
@@ -2200,12 +2255,12 @@ class OmniExtractStudio(QWidget):
 
     def addCurrentRangeToSegments(self):
         if not hasattr(self, "source_file"):
-            QMessageBox.warning(self, "No Source File", "Please select a source video first.")
+            self._message("warning", "No Source File", "Please select a source video first.")
             return
         start_ms = qtime_to_ms(self.clip_start_time_edit.time())
         end_ms = qtime_to_ms(self.clip_end_time_edit.time())
         if end_ms <= start_ms:
-            QMessageBox.warning(self, "Invalid Range", "End Time must be greater than Start Time.")
+            self._message("warning", "Invalid Range", "End Time must be greater than Start Time.")
             return
             
         row = self.segments_table.rowCount()
@@ -2220,11 +2275,11 @@ class OmniExtractStudio(QWidget):
 
     def importChaptersToSegments(self):
         if not hasattr(self, "source_file"):
-            QMessageBox.warning(self, "No Source File", "Please select a source video first.")
+            self._message("warning", "No Source File", "Please select a source video first.")
             return
         chapters = probe_video_chapters(self.source_file)
         if not chapters:
-            QMessageBox.information(self, "No Chapters", "No embedded chapters found in this video.")
+            self._message("information", "No Chapters", "No embedded chapters found in this video.")
             return
             
         for chap in chapters:
@@ -2239,7 +2294,7 @@ class OmniExtractStudio(QWidget):
             self.segments_table.setItem(row, 3, QTableWidgetItem(duration_text(end_ms - start_ms)))
             self.segments_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, (start_ms, end_ms, name))
             
-        QMessageBox.information(self, "Chapters Imported", f"Imported {len(chapters)} chapters into the segments list.")
+        self._message("information", "Chapters Imported", f"Imported {len(chapters)} chapters into the segments list.")
 
     def removeSelectedSegment(self):
         selected = self.segments_table.selectedRanges()
@@ -2264,26 +2319,26 @@ class OmniExtractStudio(QWidget):
             self.sync_clip_time_to_frame()
 
     def extractAllSegments(self):
-        if not hasattr(self, "source_file") or not hasattr(self, "save_dir"):
-            QMessageBox.warning(self, "Missing Information", "Please select a source file and save directory first.")
+        if not self.source_file or not self.save_dir:
+            self._message("warning", "Missing Information", "Please select a source file and save directory first.")
             return
             
         row_count = self.segments_table.rowCount()
         if row_count == 0:
-            QMessageBox.warning(self, "No Segments", "No segments in the list. Use '+ Add Current Range' or 'Import Chapters' first.")
+            self._message("warning", "No Segments", "No segments in the list. Use '+ Add Current Range' or 'Import Chapters' first.")
             return
             
         ffmpeg = shutil.which("ffmpeg")
         ffprobe = shutil.which("ffprobe")
         if not ffmpeg or not ffprobe:
-            QMessageBox.critical(self, "FFmpeg Not Found", "FFmpeg is required for segment cutting.")
+            self._message("critical", "FFmpeg Not Found", "FFmpeg is required for segment cutting.")
             return
 
         probe = subprocess.run(
             [ffprobe, "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=index,codec_name",
              "-of", "default=noprint_wrappers=1", self.source_file],
-            capture_output=True, text=True
+            capture_output=True, text=True, timeout=10
         )
         has_audio = bool(probe.stdout.strip())
 
@@ -2387,8 +2442,8 @@ class OmniExtractStudio(QWidget):
         
         self.multi_segment_worker = MultiSegmentWorker(tasks)
         self.multi_segment_worker.progress.connect(self._update_multi_segment_progress)
-        self.multi_segment_worker.finished.connect(self._on_multi_segment_finished)
-        self.multi_segment_worker.start()
+        self._connect_worker_result(self.multi_segment_worker, self._on_multi_segment_finished)
+        self._start_worker(self.multi_segment_worker)
 
     def _update_multi_segment_progress(self, percent, label):
         self.clip_progress_bar.setValue(percent)
@@ -2398,30 +2453,26 @@ class OmniExtractStudio(QWidget):
         self.set_extracting_state(False)
         self.extract_segments_btn.setEnabled(True)
         
-        if hasattr(self, "multi_segment_worker") and self.multi_segment_worker is not None:
-            self.multi_segment_worker.deleteLater()
-            self.multi_segment_worker = None
             
         if success:
             self.clip_progress_bar.setValue(100)
             self.progress_label.setText(f"Extracted {count} segments successfully.")
-            QMessageBox.information(
-                self, "Segments Extraction Complete",
+            self._message("information", "Segments Extraction Complete",
                 f"Successfully extracted {count} segments to:\n{self.save_dir}"
             )
         else:
             self.clip_progress_bar.setValue(0)
             self.progress_label.setText("Segment extraction cancelled or failed.")
             if message != "Cancelled":
-                QMessageBox.critical(self, "Error", message)
+                self._message("critical", "Error", message)
 
     # -----------------------------
     # Motion Extraction Logic
     # -----------------------------
     
     def extractMotion(self):
-        if not hasattr(self, "source_file") or not hasattr(self, "save_dir"):
-            QMessageBox.warning(self, "Missing Information", "Please select a source file and save directory first.")
+        if not self.source_file or not self.save_dir:
+            self._message("warning", "Missing Information", "Please select a source file and save directory first.")
             return
             
         self.motion_extract_button.setEnabled(False)
@@ -2440,14 +2491,14 @@ class OmniExtractStudio(QWidget):
             try:
                 import onnxruntime
             except ImportError:
-                QMessageBox.warning(self, "Missing Dependency", "YOLOv8 ONNX mode requires the 'onnxruntime' package.\n\nPlease run: pip install onnxruntime")
+                self._message("warning", "Missing Dependency", "YOLOv8 ONNX mode requires the 'onnxruntime' package.\n\nPlease run: pip install onnxruntime")
                 self.motion_extract_button.setEnabled(True)
                 self.motion_cancel_button.setEnabled(False)
                 return
                 
             model_path = get_resource_path("assets/models/yolov8n.onnx")
             if not os.path.exists(model_path):
-                QMessageBox.warning(self, "Missing Model", "Could not find 'yolov8n.onnx' in assets/models/")
+                self._message("warning", "Missing Model", "Could not find 'yolov8n.onnx' in assets/models/")
                 self.motion_extract_button.setEnabled(True)
                 self.motion_cancel_button.setEnabled(False)
                 return
@@ -2455,12 +2506,12 @@ class OmniExtractStudio(QWidget):
         self.motion_worker = MotionExtractionWorker(
             self.source_file, self.save_dir, ext, mode,
             sensitivity, min_area, cooldown,
-            self.unique_path, self.render_filename,
+            self.unique_path, self._filename_renderer(),
             engine, yolo_conf
         )
         self.motion_worker.progress.connect(self._update_motion_progress)
-        self.motion_worker.finished.connect(self._on_motion_finished)
-        self.motion_worker.start()
+        self._connect_worker_result(self.motion_worker, self._on_motion_finished)
+        self._start_worker(self.motion_worker)
         
     def _update_motion_progress(self, pct, label):
         self.motion_progress_bar.setValue(pct)
@@ -2470,19 +2521,16 @@ class OmniExtractStudio(QWidget):
         self.motion_extract_button.setEnabled(True)
         self.motion_cancel_button.setEnabled(False)
         
-        if hasattr(self, "motion_worker") and self.motion_worker is not None:
-            self.motion_worker.deleteLater()
-            self.motion_worker = None
             
         if success:
             self.motion_progress_bar.setValue(100)
             self.motion_progress_label.setText("Complete!")
-            QMessageBox.information(self, "Success", f"Extracted {count} motion events.\n{msg}")
+            self._message("information", "Success", f"Extracted {count} motion events.\n{msg}")
         else:
             self.motion_progress_bar.setValue(0)
             self.motion_progress_label.setText("Failed or cancelled.")
             if msg != "Cancelled":
-                QMessageBox.critical(self, "Error", msg)
+                self._message("critical", "Error", msg)
 
     # -----------------------------
     # GIF / WebP export logic
@@ -2490,7 +2538,7 @@ class OmniExtractStudio(QWidget):
 
     def queueCurrentAnimationJob(self):
         if not getattr(self, "source_file", None):
-            QMessageBox.warning(self, "No Video", "Please load a video first.")
+            self._message("warning", "No Video", "Please load a video first.")
             return
             
         state = self.gather_app_state(is_custom_job=True)
@@ -2505,21 +2553,19 @@ class OmniExtractStudio(QWidget):
         })
         self.batch_list.addItem(item)
         
-        if self.source_file not in self.batch_queue:
-            self.batch_queue.append(self.source_file)
             
-        QMessageBox.information(self, "Queued", f"Added {name} to Batch Queue with current animation settings.")
+        self._message("information", "Queued", f"Added {name} to Batch Queue with current animation settings.")
 
     def exportAnimation(self):
         if not hasattr(self, "source_file"):
-            QMessageBox.warning(self, "No Source File", "Select a video first.")
+            self._message("warning", "No Source File", "Select a video first.")
             return
 
         start_ms = qtime_to_ms(self.gif_start_time.time())
         end_ms = qtime_to_ms(self.gif_end_time.time())
 
         if end_ms <= start_ms:
-            QMessageBox.warning(self, "Invalid Range", "End time must be after start time.")
+            self._message("warning", "Invalid Range", "End time must be after start time.")
             return
 
         fmt = self.gif_format_combo.currentText()
@@ -2592,8 +2638,8 @@ class OmniExtractStudio(QWidget):
             subtitle_filter
         )
         self.gif_worker.progress.connect(self._update_gif_progress)
-        self.gif_worker.finished.connect(self._on_gif_export_finished)
-        self.gif_worker.start()
+        self._connect_worker_result(self.gif_worker, self._on_gif_export_finished)
+        self._start_worker(self.gif_worker)
 
     def _update_gif_progress(self, pct, label):
         self.gif_progress_bar.setValue(pct)
@@ -2608,9 +2654,6 @@ class OmniExtractStudio(QWidget):
             except OSError: pass
             self._gif_temp_srt = None
 
-        if hasattr(self, "gif_worker") and self.gif_worker is not None:
-            self.gif_worker.deleteLater()
-            self.gif_worker = None
 
         if cancelled:
             self.gif_progress_bar.setValue(0)
@@ -2625,13 +2668,12 @@ class OmniExtractStudio(QWidget):
         if not success:
             self.gif_progress_bar.setValue(0)
             self.gif_progress_label.setText("Export failed.")
-            QMessageBox.critical(self, "Export Failed", message or "An unknown error occurred.")
+            self._message("critical", "Export Failed", message or "An unknown error occurred.")
             return
 
         self.gif_progress_bar.setValue(100)
         self.gif_progress_label.setText(f"Done — {message}")
-        QMessageBox.information(
-            self, "Export Complete",
+        self._message("information", "Export Complete",
             f"Animation saved successfully.\n\n{message}\n\nSaved to:\n{output_path}"
         )
 
@@ -2641,7 +2683,7 @@ class OmniExtractStudio(QWidget):
 
     def startFramerateConversion(self):
         if not hasattr(self, "source_file") or not self.source_file:
-            QMessageBox.warning(self, "No Source Video", "Please select a source video first.")
+            self._message("warning", "No Source Video", "Please select a source video first.")
             return
 
         target_fps = self.conv_fps_spin.value()
@@ -2715,14 +2757,12 @@ class OmniExtractStudio(QWidget):
             audio_mode=audio_mode,
         )
         self.conv_worker.progress.connect(self._on_conv_progress)
-        self.conv_worker.finished.connect(self._on_conv_finished)
-        self.conv_worker.start()
+        self._connect_worker_result(self.conv_worker, self._on_conv_finished)
+        self._start_worker(self.conv_worker)
 
     def cancelFramerateConversion(self):
-        if hasattr(self, "conv_worker") and self.conv_worker is not None:
-            self.conv_cancel_btn.setEnabled(False)
-            self.conv_progress_label.setText("Cancelling conversion...")
-            self.conv_worker.cancel()
+        self.cancelExtraction()
+
 
     def _on_conv_progress(self, percent, message):
         self.conv_progress_bar.setValue(percent)
@@ -2735,25 +2775,23 @@ class OmniExtractStudio(QWidget):
         if cancelled:
             self.conv_progress_label.setText("Framerate conversion cancelled.")
             if not getattr(self, "in_batch_mode", False):
-                QMessageBox.information(self, "Cancelled", "Framerate conversion process was cancelled.")
+                self._message("information", "Cancelled", "Framerate conversion process was cancelled.")
         elif success:
             self.conv_progress_label.setText(f"Finished: {os.path.basename(path)}")
             if not getattr(self, "in_batch_mode", False):
-                QMessageBox.information(
-                    self, "Complete",
+                self._message("information", "Complete",
                     f"Video framerate converted successfully!\n\nSaved to:\n{path}"
                 )
         else:
             self.conv_progress_label.setText("Error during framerate conversion.")
             if not getattr(self, "in_batch_mode", False):
-                QMessageBox.critical(
-                    self, "Conversion Failed",
+                self._message("critical", "Conversion Failed",
                     f"An error occurred during framerate conversion:\n\n{error or 'Unknown error'}"
                 )
 
     def queueCurrentFramerateConversionJob(self):
         if not getattr(self, "source_file", None):
-            QMessageBox.warning(self, "No Video", "Please load a video first.")
+            self._message("warning", "No Video", "Please load a video first.")
             return
 
         state = self.gather_app_state(is_custom_job=True)
@@ -2770,10 +2808,8 @@ class OmniExtractStudio(QWidget):
         })
         self.batch_list.addItem(item)
 
-        if self.source_file not in self.batch_queue:
-            self.batch_queue.append(self.source_file)
 
-        QMessageBox.information(self, "Queued", f"Added {name} to Batch Queue with current framerate conversion settings.")
+        self._message("information", "Queued", f"Added {name} to Batch Queue with current framerate conversion settings.")
 
     # -----------------------------
     # Frame Interpolation Actions
@@ -2781,7 +2817,7 @@ class OmniExtractStudio(QWidget):
 
     def startInterpolation(self):
         if not hasattr(self, "source_file") or not self.source_file:
-            QMessageBox.warning(self, "No Source Video", "Please select a source video first.")
+            self._message("warning", "No Source Video", "Please select a source video first.")
             return
 
         target_fps = self.interp_fps_spin.value()
@@ -2789,15 +2825,13 @@ class OmniExtractStudio(QWidget):
         if "RIFE" in engine_text or "FILM" in engine_text:
             status_text, is_ready, model_path = get_model_status_info(getattr(self, "custom_rife_path", None))
             if not model_path:
-                QMessageBox.warning(
-                    self, "AI Model Missing",
+                self._message("warning", "AI Model Missing",
                     "Interpolation model was not found.\n\n"
                     "Please place 'RIFE_fp32.onnx' in 'assets/models/' or click 'Select Custom Model'."
                 )
                 return
             if not is_ready:
-                QMessageBox.warning(
-                    self, "AI Model Environment Not Ready",
+                self._message("warning", "AI Model Environment Not Ready",
                     f"{status_text}\n\n"
                     "Tip: You can use 'FFmpeg Motion Interpolation (MCI)' to interpolate frames right now without any additional dependencies!"
                 )
@@ -2875,14 +2909,12 @@ class OmniExtractStudio(QWidget):
             rife_model_path=getattr(self, "custom_rife_path", None),
         )
         self.interp_worker.progress.connect(self._on_interpolation_progress)
-        self.interp_worker.finished.connect(self._on_interpolation_finished)
-        self.interp_worker.start()
+        self._connect_worker_result(self.interp_worker, self._on_interpolation_finished)
+        self._start_worker(self.interp_worker)
 
     def cancelInterpolation(self):
-        if hasattr(self, "interp_worker") and self.interp_worker is not None:
-            self.interp_cancel_btn.setEnabled(False)
-            self.interp_progress_label.setText("Cancelling interpolation...")
-            self.interp_worker.cancel()
+        self.cancelExtraction()
+
 
     def _on_interpolation_progress(self, percent, message):
         self.interp_progress_bar.setValue(percent)
@@ -2895,25 +2927,23 @@ class OmniExtractStudio(QWidget):
         if cancelled:
             self.interp_progress_label.setText("Interpolation cancelled.")
             if not getattr(self, "in_batch_mode", False):
-                QMessageBox.information(self, "Cancelled", "Interpolation process was cancelled.")
+                self._message("information", "Cancelled", "Interpolation process was cancelled.")
         elif success:
             self.interp_progress_label.setText(f"Finished: {os.path.basename(path)}")
             if not getattr(self, "in_batch_mode", False):
-                QMessageBox.information(
-                    self, "Complete",
+                self._message("information", "Complete",
                     f"Video successfully interpolated!\n\nSaved to:\n{path}"
                 )
         else:
             self.interp_progress_label.setText("Error during interpolation.")
             if not getattr(self, "in_batch_mode", False):
-                QMessageBox.critical(
-                    self, "Interpolation Failed",
+                self._message("critical", "Interpolation Failed",
                     f"An error occurred during interpolation:\n\n{error or 'Unknown error'}"
                 )
 
     def queueCurrentInterpolationJob(self):
         if not getattr(self, "source_file", None):
-            QMessageBox.warning(self, "No Video", "Please load a video first.")
+            self._message("warning", "No Video", "Please load a video first.")
             return
 
         state = self.gather_app_state(is_custom_job=True)
@@ -2930,10 +2960,8 @@ class OmniExtractStudio(QWidget):
         })
         self.batch_list.addItem(item)
 
-        if self.source_file not in self.batch_queue:
-            self.batch_queue.append(self.source_file)
 
-        QMessageBox.information(self, "Queued", f"Added {name} to Batch Queue with current interpolation settings.")
+        self._message("information", "Queued", f"Added {name} to Batch Queue with current interpolation settings.")
 
     # -----------------------------
     # Output helpers
@@ -2961,8 +2989,7 @@ class OmniExtractStudio(QWidget):
 
     def detectScenes(self):
         if not hasattr(self, "source_file"):
-            QMessageBox.warning(
-                self, "No Source File",
+            self._message("warning", "No Source File",
                 "Select a video first."
             )
             return
@@ -2983,30 +3010,26 @@ class OmniExtractStudio(QWidget):
         self.scene_worker = SceneDetectionWorker(self.source_file, threshold)
         self.scene_worker.progress.connect(self.progress_bar.setValue)
         self.scene_worker.error.connect(
-            lambda msg: QMessageBox.warning(self, "Scene Detection Error", msg)
+            lambda msg: self._message("warning", "Scene Detection Error", msg)
         )
-        self.scene_worker.finished.connect(self._on_scene_detection_finished)
-        self.scene_worker.start()
+        self._connect_worker_result(self.scene_worker, self._on_scene_detection_finished)
+        self._start_worker(self.scene_worker)
 
     def _on_scene_detection_finished(self, scenes, frame_count, fps):
         self.set_extracting_state(False)
         self.progress_bar.setValue(100)
         
-        if hasattr(self, "scene_worker") and self.scene_worker is not None:
-            self.scene_worker.deleteLater()
-            self.scene_worker = None
 
         if not scenes:
-            QMessageBox.information(
-                self, "Scene Detection",
+            self._message("information", "Scene Detection",
                 "No scene changes were detected with that threshold."
             )
             return
 
         dialog = SceneResultsDialog(scenes, frame_count, fps, self)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.action:
-            if not hasattr(self, "save_dir"):
-                QMessageBox.warning(self, "Missing Output", "Choose a save directory first.")
+            if not self.save_dir:
+                self._message("warning", "Missing Output", "Choose a save directory first.")
                 return
                 
             action = dialog.action
@@ -3018,28 +3041,25 @@ class OmniExtractStudio(QWidget):
             
             self.scene_action_worker = SceneActionWorker(
                 action, scenes, self.source_file, self.save_dir, ext,
-                self.render_filename, self.unique_path, fps, frame_count
+                self._filename_renderer(), self.unique_path, fps, frame_count
             )
             self.scene_action_worker.progress.connect(
                 lambda pct, lbl: (self.progress_bar.setValue(pct), self.progress_label.setText(lbl))
             )
-            self.scene_action_worker.finished.connect(self._on_scene_action_finished)
-            self.scene_action_worker.start()
+            self._connect_worker_result(self.scene_action_worker, self._on_scene_action_finished)
+            self._start_worker(self.scene_action_worker)
             
     def _on_scene_action_finished(self, success, msg):
         self.set_extracting_state(False)
         self.progress_bar.setValue(100)
         self.progress_label.setText("Complete.")
         
-        if hasattr(self, "scene_action_worker") and self.scene_action_worker is not None:
-            self.scene_action_worker.deleteLater()
-            self.scene_action_worker = None
             
         if success:
-            QMessageBox.information(self, "Success", msg)
+            self._message("information", "Success", msg)
             self.open_output_button.setEnabled(True)
         else:
-            QMessageBox.critical(self, "Error", msg)
+            self._message("critical", "Error", msg)
 
     # -----------------------------
     # Batch processing
@@ -3063,7 +3083,7 @@ class OmniExtractStudio(QWidget):
         if not ok:
             return
             
-        state = self.gather_app_state(is_custom_job=True)
+        state = self.gather_app_state(is_custom_job=False)
         # Ensure target_tab matches the selected mode
         if mode == "Motion Highlights":
             state["target_tab"] = 1
@@ -3081,17 +3101,14 @@ class OmniExtractStudio(QWidget):
             state["target_tab"] = 0
             
         for path in files:
-            if path not in self.batch_queue:
-                self.batch_queue.append(path)
-                
-                name = os.path.basename(path)
-                item = QListWidgetItem(f"{name} [{mode} Bulk Job]")
-                item.setData(Qt.ItemDataRole.UserRole, {
-                    "path": path,
-                    "state": state,
-                    "mode": mode
-                })
-                self.batch_list.addItem(item)
+            name = os.path.basename(path)
+            item = QListWidgetItem(f"{name} [{mode} Bulk Job]")
+            item.setData(Qt.ItemDataRole.UserRole, {
+                "path": path,
+                "state": state,
+                "mode": mode
+            })
+            self.batch_list.addItem(item)
 
     def removeBatchVideos(self):
         selected = self.batch_list.selectedItems()
@@ -3101,184 +3118,79 @@ class OmniExtractStudio(QWidget):
             path = data["path"] if data else item.text()
             
             self.batch_list.takeItem(row)
-            if path in self.batch_queue:
-                self.batch_queue.remove(path)
 
     def clearBatchVideos(self):
-        self.batch_queue.clear()
         self.batch_list.clear()
 
     def processBatch(self):
-        if self.batch_list.count() == 0:
-            QMessageBox.information(
-                self, "Batch Queue",
-                "The batch queue is empty."
-            )
+        if not self.batch_list.count() or not self.save_dir:
+            self._message('warning', 'Batch Queue', 'Add jobs and choose an output directory first.')
             return
-
-        if not hasattr(self, "save_dir"):
-            QMessageBox.warning(
-                self, "Missing Output",
-                "Choose a save directory first."
-            )
-            return
-
-        self.batch_jobs = []
-        for i in range(self.batch_list.count()):
-            item = self.batch_list.item(i)
-            data = item.data(Qt.ItemDataRole.UserRole)
-            if data is not None:
-                self.batch_jobs.append(data)
-            else:
-                self.batch_jobs.append({
-                    "path": item.text(),
-                    "state": None,
-                    "mode": "Extract Frames"
-                })
-
-        self.batch_completed = 0
-        self.batch_original_file = getattr(self, "source_file", None)
-        
+        self.cancel_requested = False
+        self.batch_jobs = [copy.deepcopy(self.batch_list.item(i).data(Qt.ItemDataRole.UserRole))
+                           for i in range(self.batch_list.count())]
+        self._batch_original = (self.source_file, self.gather_app_state(is_custom_job=True))
+        self.batch_results = []
+        self.in_batch_mode = True
         self.process_next_batch_item()
 
     def process_next_batch_item(self):
-        # Clean up any leftover workers
-        for w_name in [
-            "frame_worker", "clip_worker", "motion_worker", "gif_worker",
-            "interp_worker", "conv_worker", "multi_segment_worker", "scene_worker"
-        ]:
-            worker = getattr(self, w_name, None)
-            if worker is not None:
-                worker.deleteLater()
-                setattr(self, w_name, None)
-
-        gc.collect()
-
-        if sys.platform.startswith("linux"):
-            try:
-                import ctypes
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception:
-                pass
-
-        if self.cancel_requested or not self.batch_jobs:
-            self.source_file = self.batch_original_file if self.batch_original_file else getattr(self, "source_file", None)
-            self.in_batch_mode = False
-            QMessageBox.information(
-                self, "Batch Complete",
-                f"Batch processing finished.\nProcessed {self.batch_completed} videos."
-            )
+        if self._closing:
             return
-            
-        job = self.batch_jobs.pop(0)
-        path = job["path"]
-        self.load_video_path(path, async_probe=False)
-        self.in_batch_mode = True
-        
-        state = job["state"]
-        mode = job["mode"]
-        
-        if state is not None:
+        if self.cancel_requested or not self.batch_jobs:
+            self.in_batch_mode = False
+            source, state = self._batch_original
+            if source:
+                self.load_video_path(source, async_probe=False)
+            else:
+                self.source_file = ""
+                self.source_file_edit.clear()
+                self.current_metadata = None
             self.apply_app_state(state)
-        
-        if "Motion" in mode:
-            self.tab_widget.setCurrentWidget(self.motion_tab)
-        elif "Extract Clip" in mode or (mode.startswith("Convert") and "Framerate" not in mode):
-            self.tab_widget.setCurrentWidget(self.clip_tab)
-        elif "GIF" in mode or "WebP" in mode:
-            self.tab_widget.setCurrentWidget(self.gif_webp_tab)
-        elif "Framerate Conversion" in mode:
-            self.tab_widget.setCurrentWidget(self.interp_tab)
-            if hasattr(self, "fps_subtab_widget"):
-                self.fps_subtab_widget.setCurrentIndex(0)
-        elif "Interpolat" in mode:
-            self.tab_widget.setCurrentWidget(self.interp_tab)
-            if hasattr(self, "fps_subtab_widget"):
-                self.fps_subtab_widget.setCurrentIndex(1)
-        else:
-            self.tab_widget.setCurrentWidget(self.frame_tab)
-
-        if "Extract Clip" in mode or (mode.startswith("Convert") and "Framerate" not in mode):
-            if state is None and self.current_metadata:
-                frames = int(self.current_metadata.get("Total Frames", "0").replace(",", ""))
-                self.clip_start_frame_spinbox.setValue(0)
-                self.clip_end_frame_spinbox.setValue(frames)
-                
-            self.extractClip()
-            
-            if getattr(self, "clip_worker", None) is not None:
-                def on_batch_clip_finished(success, cancelled, clip_p, err):
-                    if not cancelled and success:
-                        self.batch_completed += 1
-                        QTimer.singleShot(100, self.process_next_batch_item)
-                    else:
-                        self.in_batch_mode = False
-                self.clip_worker.finished.connect(on_batch_clip_finished)
-                
-        elif "Motion" in mode:
-            self.extractMotion()
-            if getattr(self, "motion_worker", None) is not None:
-                def on_batch_motion_finished(success, count, msg):
-                    if success and not self.cancel_requested:
-                        self.batch_completed += 1
-                        QTimer.singleShot(100, self.process_next_batch_item)
-                    else:
-                        self.in_batch_mode = False
-                self.motion_worker.finished.connect(on_batch_motion_finished)
-                
-        elif "GIF" in mode or "WebP" in mode:
-            if state is None:
-                self.gif_start_time.setTime(QTime(0, 0, 0, 0))
-                if self.current_metadata:
-                    ms = self.current_metadata.get("DurationMs", 0)
-                    self.gif_end_time.setTime(ms_to_qtime(ms))
-                
-            self.exportAnimation()
-            
-            if getattr(self, "gif_worker", None) is not None:
-                def on_batch_animation_finished(success, cancelled, out_p, msg):
-                    if not cancelled and success:
-                        self.batch_completed += 1
-                        QTimer.singleShot(100, self.process_next_batch_item)
-                    else:
-                        self.in_batch_mode = False
-                self.gif_worker.finished.connect(on_batch_animation_finished)
-
-        elif "Framerate Conversion" in mode:
-            self.startFramerateConversion()
-            if getattr(self, "conv_worker", None) is not None:
-                def on_batch_conv_finished(success, cancelled, path, err):
-                    if not cancelled and success:
-                        self.batch_completed += 1
-                        QTimer.singleShot(100, self.process_next_batch_item)
-                    else:
-                        self.in_batch_mode = False
-                self.conv_worker.finished.connect(on_batch_conv_finished)
-
-        elif "Interpolat" in mode:
-            self.startInterpolation()
-            if getattr(self, "interp_worker", None) is not None:
-                def on_batch_interp_finished(success, cancelled, path, err):
-                    if not cancelled and success:
-                        self.batch_completed += 1
-                        QTimer.singleShot(100, self.process_next_batch_item)
-                    else:
-                        self.in_batch_mode = False
-                self.interp_worker.finished.connect(on_batch_interp_finished)
-
-        else:
-            if state is None:
-                self.extract_part_checkbox.setChecked(False)
-            self.extractFrames()
-            
-            if getattr(self, "frame_worker", None) is not None:
-                def on_batch_frame_finished(extracted, elapsed, cancelled):
-                    if not cancelled:
-                        self.batch_completed += 1
-                        QTimer.singleShot(100, self.process_next_batch_item)
-                    else:
-                        self.in_batch_mode = False
-                self.frame_worker.finished.connect(on_batch_frame_finished)
+            self.job_state = 'completed'
+            self._refresh_job_controls()
+            good = sum(o.status == JobStatus.SUCCESS for _, o in self.batch_results)
+            failed = sum(o.status == JobStatus.FAILED for _, o in self.batch_results)
+            details = '\n'.join(f'{name}: {o.error}' for name, o in self.batch_results if o.error)
+            self._message('information', 'Batch Complete',
+                          f'{good} succeeded; {failed} failed. Remaining: {len(self.batch_jobs)}.\n'
+                          f'Outputs: {self.save_dir}\n{details}')
+            return
+        self._batch_job = self.batch_jobs.pop(0)
+        job = self._batch_job
+        self._batch_error = ''
+        self._dispatching_batch = True
+        try:
+            self.load_video_path(job['path'], async_probe=False)
+            if not self.current_metadata:
+                raise ValueError('Video metadata unavailable')
+            if job.get('state') is not None:
+                self.apply_app_state(job['state'])
+            mode = job['mode']
+            if 'Motion' in mode:
+                self.extractMotion()
+            elif 'GIF' in mode or 'WebP' in mode:
+                if job.get('state') is None:
+                    self.gif_start_time.setTime(ms_to_qtime(0))
+                    self.gif_end_time.setTime(ms_to_qtime(self.current_metadata['DurationMs']))
+                self.exportAnimation()
+            elif 'Framerate Conversion' in mode:
+                self.startFramerateConversion()
+            elif 'Interpolat' in mode:
+                self.startInterpolation()
+            elif 'Clip' in mode or mode.startswith('Convert'):
+                self.extractClip()
+            else:
+                if job.get('state') is None:
+                    self.extract_part_checkbox.setChecked(False)
+                self.extractFrames()
+        except Exception as exc:
+            self._batch_error = str(exc)
+        finally:
+            self._dispatching_batch = False
+        if self._active_worker is None:
+            self.batch_results.append((job['path'], JobOutcome(JobStatus.FAILED, error=self._batch_error or 'Job could not start')))
+            QTimer.singleShot(0, self.process_next_batch_item)
 
     # -----------------------------
     # Full-App Presets
@@ -3312,7 +3224,7 @@ class OmniExtractStudio(QWidget):
             
         name = name.strip()
         if self.preset_manager.is_builtin(name) or name == "Custom...":
-            QMessageBox.warning(self, "Invalid Name", "You cannot overwrite built-in presets.")
+            self._message("warning", "Invalid Name", "You cannot overwrite built-in presets.")
             return
 
         state = self.gather_app_state()
@@ -3343,7 +3255,119 @@ class OmniExtractStudio(QWidget):
             self._block_preset_signals = False
             self.apply_app_state(self.preset_manager.get_preset("Default"))
 
+    _extra_controls = ('filename_template_edit', 'export_manifest_checkbox', 'blur_threshold_spinbox',
+        'motion_engine_combo', 'motion_cooldown_spin', 'motion_yolo_conf', 'motion_ext_combo',
+        'gif_custom_width_spin', 'gif_dither_combo', 'gif_lossless_checkbox', 'gif_loop_combo',
+        'clip_format_combo', 'clip_hw_accel_combo', 'clip_subtitle_action')
+
+    @staticmethod
+    def _control_value(widget):
+        if isinstance(widget, QComboBox):
+            return widget.currentText()
+        if isinstance(widget, QCheckBox):
+            return widget.isChecked()
+        if isinstance(widget, QLineEdit):
+            return widget.text()
+        return widget.value()
+
+    @staticmethod
+    def _set_control_value(widget, value):
+        if isinstance(widget, QComboBox):
+            widget.setCurrentText(value)
+        elif isinstance(widget, QCheckBox):
+            widget.setChecked(value)
+        elif isinstance(widget, QLineEdit):
+            widget.setText(value)
+        else:
+            widget.setValue(value)
+
     def gather_app_state(self, is_custom_job=False):
+        state = self._gather_legacy_state(is_custom_job)
+        state['schema_version'] = 2
+        state['controls'] = {name: self._control_value(getattr(self, name)) for name in self._extra_controls}
+        state['custom_rife_path'] = getattr(self, 'custom_rife_path', None)
+        state['subtitles'] = {}
+        for name in ('frame_subtitle_combo', 'clip_subtitle_combo', 'gif_subtitle_combo'):
+            index = getattr(self, name).currentIndex() - 1
+            track = self.subtitle_tracks[index] if 0 <= index < len(getattr(self, 'subtitle_tracks', [])) else None
+            state['subtitles'][name] = copy.deepcopy(track)
+        return copy.deepcopy(state)
+
+    def apply_app_state(self, state):
+        from ..utils.presets import BUILTIN_PRESETS
+        state = copy.deepcopy(state)
+        merged = copy.deepcopy(BUILTIN_PRESETS['Default'])
+        merged.update(state)
+        if merged.get('motion_mode') == 'MOG2':
+            merged['motion_mode'] = 'Keyframes'
+        if 'RIFE' in merged.get('interp_engine', '') or 'FILM' in merged.get('interp_engine', ''):
+            merged['interp_engine'] = 'AI Neural Interpolation (RIFE ONNX)'
+        for prefix in ('conv', 'interp'):
+            key = prefix + '_fps_preset'
+            if key not in state:
+                combo = getattr(self, prefix + '_fps_preset_combo')
+                rate = merged.get(prefix + '_fps', 24 if prefix == 'conv' else 60)
+                merged[key] = next((combo.itemText(i) for i in range(combo.count())
+                                    if combo.itemText(i).startswith(f'{rate:g} FPS')), 'Custom')
+        controls = { 'filename_template_edit': 'frame_{timestamp}', 'export_manifest_checkbox': False,
+            'blur_threshold_spinbox': 100.0, 'motion_engine_combo': 'MOG2 (Pixel-Based)',
+            'motion_cooldown_spin': 2000, 'motion_yolo_conf': 0.4,
+            'motion_ext_combo': '.mp4' if merged.get('motion_mode') == 'Clips' else '.jpg',
+            'gif_custom_width_spin': 480, 'gif_dither_combo': 'sierra2_4a', 'gif_lossless_checkbox': False,
+            'gif_loop_combo': 'Infinite Loop', 'clip_format_combo': 'MP4',
+            'clip_hw_accel_combo': self.clip_hw_accel_combo.itemText(0),
+            'clip_subtitle_action': self.clip_subtitle_action.itemText(0)}
+        for old, new in (('clip_format', 'clip_format_combo'), ('clip_hw_accel', 'clip_hw_accel_combo'),
+                         ('gif_dither', 'gif_dither_combo'), ('gif_lossless', 'gif_lossless_checkbox'),
+                         ('gif_loop', 'gif_loop_combo')):
+            if old in state:
+                controls[new] = state[old]
+        controls.update(state.get('controls', {}))
+        blockers = [QSignalBlocker(w) for w in vars(self).values() if isinstance(w, QWidget)]
+        try:
+            self._apply_legacy_state(merged)
+            # Mode changes rebuild the extension options; signals are blocked.
+            self.motion_ext_combo.clear()
+            self.motion_ext_combo.addItems(['.mp4', '.mkv', '.avi'] if self.motion_mode_combo.currentText() == 'Clips' else ['.jpg', '.png'])
+            for name, value in controls.items():
+                self._set_control_value(getattr(self, name), value)
+            self.custom_rife_path = state.get('custom_rife_path')
+            tracks = getattr(self, 'subtitle_tracks', [])
+            added = False
+            for track in state.get('subtitles', {}).values():
+                if track and track['type'] == 'external' and os.path.isfile(track['path']) and not any(t.get('path') == track['path'] for t in tracks):
+                    tracks.append(track)
+                    added = True
+            self.subtitle_tracks = tracks
+            if added:
+                self._populate_subtitle_combos()
+            for name in ('frame_subtitle_combo', 'clip_subtitle_combo', 'gif_subtitle_combo'):
+                track = state.get('subtitles', {}).get(name)
+                combo = getattr(self, name)
+                combo.setCurrentIndex(0)
+                if not track:
+                    continue
+                key = 'path' if track['type'] == 'external' else 'sub_index'
+                index = next((i for i, t in enumerate(self.subtitle_tracks) if t.get('type') == track['type'] and t.get(key) == track.get(key)), None)
+                if index is None or (key == 'path' and not os.path.isfile(track['path'])):
+                    if self.in_batch_mode:
+                        raise ValueError('Selected subtitle resource is unavailable')
+                else:
+                    combo.setCurrentIndex(index + 1)
+        finally:
+            del blockers
+            self._block_preset_signals = False
+        self.toggleTimeFields()
+        self.update_custom_fps_visibility(self.extraction_mode_combo.currentText())
+        self._update_gif_format_options(self.gif_format_combo.currentText())
+        self._update_gif_resolution(self.gif_resolution_combo.currentText())
+        self._on_conv_mode_changed(self.conv_mode_combo.currentText())
+        self._on_interp_engine_changed(self.interp_engine_combo.currentText())
+        self._update_rife_status_display()
+        self.mog2_widget.setVisible('MOG2' in self.motion_engine_combo.currentText())
+        self.yolo_widget.setVisible('YOLO' in self.motion_engine_combo.currentText())
+
+    def _gather_legacy_state(self, is_custom_job=False):
         state = {
             "target_tab": self.tab_widget.currentIndex(),
             "format": self.format_combo.currentText(),
@@ -3401,7 +3425,7 @@ class OmniExtractStudio(QWidget):
             
         return state
 
-    def apply_app_state(self, state):
+    def _apply_legacy_state(self, state):
         self._block_preset_signals = True
         
         if "target_tab" in state:
@@ -3504,6 +3528,12 @@ class OmniExtractStudio(QWidget):
             (self.interp_audio_combo, "currentTextChanged"),
         ]
         
+        for name in self._extra_controls:
+            widget = getattr(self, name)
+            signal = ('currentTextChanged' if isinstance(widget, QComboBox) else
+                      'toggled' if isinstance(widget, QCheckBox) else
+                      'textChanged' if isinstance(widget, QLineEdit) else 'valueChanged')
+            widgets.append((widget, signal))
         for widget, signal_name in widgets:
             signal = getattr(widget, signal_name, None)
             if signal:
@@ -3516,3 +3546,25 @@ class OmniExtractStudio(QWidget):
     def addUtilityControls(self):
         pass
 
+
+
+def _guard_job(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        if self._closing or self._active_worker is not None or (self.in_batch_mode and not self._dispatching_batch):
+            return
+        if method.__name__ != 'processBatch' and not self.current_metadata:
+            self._message('warning', 'Source Unavailable', 'Load a video and wait for metadata before processing.')
+            return
+        try:
+            return method(self, *args, **kwargs)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            self.set_extracting_state(False)
+            self._refresh_job_controls()
+            self._message('critical', 'Could Not Start Job', str(exc))
+    return guarded
+
+
+for _method in ('extractFrames', 'extractClip', 'extractAllSegments', 'extractMotion',
+                'exportAnimation', 'startFramerateConversion', 'startInterpolation', 'detectScenes', 'processBatch'):
+    setattr(OmniExtractStudio, _method, _guard_job(getattr(OmniExtractStudio, _method)))

@@ -1,3 +1,5 @@
+from ..media.process import remove_file
+from .base import ManagedWorker, ResultFormat
 import os
 import shutil
 import subprocess
@@ -10,7 +12,8 @@ from ..media.hwaccel import probe_capabilities, get_hwaccel_encode_profile
 from ..ai.rife import find_rife_model, is_rife_available, get_model_status_info, RIFEInterpolator
 
 
-class InterpolationWorker(QThread):
+class InterpolationWorker(ManagedWorker):
+    result_format = ResultFormat.FILE
     """
     Worker thread for video framerate changing and motion-compensated frame interpolation.
     Supports FFmpeg minterpolate, standard fps resampling, and optional RIFE AI neural interpolation.
@@ -67,7 +70,7 @@ class InterpolationWorker(QThread):
             except Exception:
                 pass
 
-    def run(self):
+    def _run(self):
         if not os.path.isfile(self.source_file):
             self.finished.emit(False, False, "", f"Source file does not exist: {self.source_file}")
             return
@@ -78,7 +81,12 @@ class InterpolationWorker(QThread):
             return
 
         if self.engine == "rife":
-            self._run_rife_pipeline(ffmpeg)
+            self._rife_cap = None
+            try:
+                self._run_rife_pipeline(ffmpeg)
+            finally:
+                if self._rife_cap is not None:
+                    self._rife_cap.release()
         else:
             self._run_ffmpeg_pipeline(ffmpeg)
 
@@ -114,6 +122,18 @@ class InterpolationWorker(QThread):
 
         return f"minterpolate={':'.join(parts)}"
 
+    def _audio_tempo_filter(self):
+        ratio = self.target_fps / self.source_fps
+        factors = []
+        while ratio < 0.5:
+            factors.append(0.5)
+            ratio /= 0.5
+        while ratio > 2:
+            factors.append(2.0)
+            ratio /= 2
+        factors.append(ratio)
+        return ','.join(f'atempo={value:.8f}' for value in factors)
+
     def _resolve_codec_args(self) -> List[str]:
         """Resolve video codec and quality arguments with optional hardware acceleration."""
         codec = "hevc" if self.video_codec in ("libx265", "hevc") else "h264"
@@ -138,80 +158,30 @@ class InterpolationWorker(QThread):
         cmd = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
             "-threads", "0", "-filter_threads", "0",
+            *(["-r", f"{self.target_fps:.4f}"] if self.engine == "conform" else []),
             "-i", self.source_file,
-            "-vf", vf,
+            "-vf", "setpts=PTS-STARTPTS" if self.engine == "conform" else vf,
         ]
         if self.engine == "conform":
-            cmd.extend(["-r", f"{self.target_fps:.4f}"])
+            cmd.extend(["-fps_mode", "passthrough"])
 
         cmd.extend(codec_args)
 
         if self.audio_mode == "mute":
             cmd.append("-an")
+        elif self.engine == "conform":
+            cmd.extend(["-af", self._audio_tempo_filter(), "-c:a", "aac"])
         else:
             # Preserving audio stream
             cmd.extend(["-c:a", "copy"])
 
         cmd.extend(["-progress", "pipe:1", self.output_path])
 
-        self.progress.emit(0, "Starting interpolation...")
-
-        ffmpeg_error = ""
-        try:
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1
-            )
-
-            while self.process.poll() is None:
-                if self.cancel_requested:
-                    self._kill_process()
-                    break
-
-                line = self.process.stdout.readline()
-                if line:
-                    line = line.strip()
-                    if line.startswith("out_time_ms="):
-                        try:
-                            out_ms = int(line.split("=", 1)[1]) // 1000
-                            pct = int(min(99, max(0, out_ms * 100 / self.duration_ms)))
-                            self.progress.emit(
-                                pct,
-                                f"Interpolating: {format_timestamp(out_ms)} / {format_timestamp(self.duration_ms)} ({self.target_fps:.1f} FPS)"
-                            )
-                        except (ValueError, ZeroDivisionError):
-                            pass
-
-            _, stderr_data = self.process.communicate(timeout=15)
-            if stderr_data:
-                ffmpeg_error = stderr_data.strip()
-
-        except Exception as exc:
-            ffmpeg_error = str(exc)
-            self._kill_process()
-
-        if self.cancel_requested:
-            if os.path.exists(self.output_path):
-                try:
-                    os.remove(self.output_path)
-                except OSError:
-                    pass
-            self.finished.emit(False, True, self.output_path, "Cancelled by user.")
-            return
-
-        success = (
-            self.process is not None
-            and self.process.returncode == 0
-            and os.path.isfile(self.output_path)
-            and os.path.getsize(self.output_path) > 0
-        )
-
-        if success:
-            self.progress.emit(100, "Interpolation complete!")
-        self.finished.emit(success, False, self.output_path, ffmpeg_error)
+        from .clip_worker import extract
+        if self.engine == "conform":
+            self.duration_ms = round(self.duration_ms * self.source_fps / self.target_fps)
+        success, error = extract(self, cmd, self.duration_ms, self.output_path, self.progress.emit)
+        self.finished.emit(success, self.cancel_requested, self.output_path, error)
 
     def _run_rife_pipeline(self, ffmpeg: str):
         """Execute AI neural interpolation with RIFE ONNX model."""
@@ -231,6 +201,7 @@ class InterpolationWorker(QThread):
             return
 
         cap = cv2.VideoCapture(self.source_file)
+        self._rife_cap = cap
         if not cap.isOpened():
             self.finished.emit(False, False, "", f"Failed to read source video: {self.source_file}")
             return
@@ -277,196 +248,130 @@ class InterpolationWorker(QThread):
         enc_cmd.extend(codec_args)
         enc_cmd.append(self.output_path)
 
-        try:
-            self.process = subprocess.Popen(
-                enc_cmd,
-                stdin=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=10**7
-            )
-        except Exception as exc:
-            cap.release()
-            self.finished.emit(False, False, "", f"Failed to launch FFmpeg encoder: {exc}")
-            return
+        import tempfile
+        stderr_file = tempfile.TemporaryFile()
+        stop = threading.Event()
+        errors = []
+        in_q = queue.Queue(maxsize=2)
+        out_q = queue.Queue(maxsize=2)
 
-        def interpolate_recursive(f0, f1, d):
-            if d <= 0 or self.cancel_requested:
-                return []
-            mid = interpolator.interpolate_pair(f0, f1)
-            if d == 1:
-                return [mid]
-            left = interpolate_recursive(f0, mid, d - 1)
-            right = interpolate_recursive(mid, f1, d - 1)
-            return left + [mid] + right
+        def put(q, item):
+            while not stop.is_set() and not self.cancel_requested:
+                try:
+                    q.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    pass
+            return False
 
-        # Start multi-threaded reader and writer to overlap I/O with GPU inference
-        in_q = queue.Queue(maxsize=10)
-        out_q = queue.Queue(maxsize=10)
+        def get(q):
+            while not stop.is_set() and not self.cancel_requested:
+                try:
+                    return q.get(timeout=0.1)
+                except queue.Empty:
+                    pass
+            return None
+
+        def fail(exc):
+            errors.append(str(exc))
+            stop.set()
 
         def reader():
-            while not self.cancel_requested:
-                r, f = cap.read()
-                if not r or f is None:
-                    break
-                try:
-                    in_q.put(f, timeout=0.2)
-                except queue.Full:
-                    continue
             try:
-                in_q.put(None, timeout=1.0)
-            except Exception:
-                pass
-            cap.release()
+                while not stop.is_set() and not self.cancel_requested:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    if not put(in_q, frame):
+                        break
+                put(in_q, None)
+            except Exception as exc:
+                fail(exc)
+            finally:
+                cap.release()
 
         def writer():
-            while not self.cancel_requested:
-                try:
-                    item = out_q.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                if item is None:
-                    break
-                try:
-                    if self.process and self.process.stdin:
-                        self.process.stdin.write(item)
-                except Exception:
-                    break
-
-        r_thread = threading.Thread(target=reader, daemon=True)
-        w_thread = threading.Thread(target=writer, daemon=True)
-        r_thread.start()
-        w_thread.start()
-
-        prev_frame = None
-        while not self.cancel_requested:
             try:
-                prev_frame = in_q.get(timeout=0.5)
-                break
-            except queue.Empty:
-                if not r_thread.is_alive():
-                    break
-
-        if prev_frame is None:
-            self._kill_process()
-            self.finished.emit(False, False, "", "Could not read initial video frame.")
-            try:
-                out_q.put(None, timeout=0.5)
-            except Exception:
-                pass
-            return
-
-        # Write first frame
-        try:
-            out_q.put(prev_frame.tobytes(), timeout=1.0)
-        except Exception:
-            pass
-
-        frame_idx = 1
-        ffmpeg_error = ""
-
-        try:
-            while not self.cancel_requested:
-                curr_frame = None
-                while not self.cancel_requested:
-                    try:
-                        curr_frame = in_q.get(timeout=0.2)
+                while not stop.is_set() and not self.cancel_requested:
+                    item = get(out_q)
+                    if item is None:
                         break
-                    except queue.Empty:
-                        if not r_thread.is_alive():
-                            break
-
-                if curr_frame is None or self.cancel_requested:
-                    break
-
-                # Generate intermediate frames according to recursion depth
-                intermediates = interpolate_recursive(prev_frame, curr_frame, depth)
-
-                # Write intermediate frames and current frame
-                for intermediate in intermediates:
-                    if self.cancel_requested:
-                        break
-                    while not self.cancel_requested:
-                        try:
-                            out_q.put(intermediate.tobytes(), timeout=0.2)
-                            break
-                        except queue.Full:
-                            pass
-
-                while not self.cancel_requested:
-                    try:
-                        out_q.put(curr_frame.tobytes(), timeout=0.2)
-                        break
-                    except queue.Full:
-                        pass
-
-                prev_frame = curr_frame
-                frame_idx += 1
-
-                provider_name = getattr(interpolator, "active_provider", "AI")
-                if "CUDA" in provider_name:
-                    dev_label = "CUDA GPU"
-                elif "Dml" in provider_name:
-                    dev_label = "DirectML GPU"
-                elif "CPU" in provider_name:
-                    dev_label = "CPU"
-                else:
-                    dev_label = provider_name
-
-                pct = int(min(99, frame_idx * 100 / total_frames))
-                self.progress.emit(
-                    pct,
-                    f"AI RIFE [{dev_label}] ({multiplier}x): Frame {frame_idx}/{total_frames} ({pct}%)"
-                )
-
-        except Exception as exc:
-            ffmpeg_error = str(exc)
-
-        try:
-            out_q.put(None, timeout=1.0)
-        except Exception:
-            pass
-
-        w_thread.join(timeout=1.0)
-        r_thread.join(timeout=1.0)
-
-        try:
-            if self.process.stdin:
+                    remaining = memoryview(item)
+                    while remaining and not stop.is_set() and not self.cancel_requested:
+                        written = self.process.stdin.write(remaining)
+                        if not written:
+                            raise BrokenPipeError('Encoder input closed')
+                        remaining = remaining[written:]
                 self.process.stdin.close()
-            _, stderr_data = self.process.communicate(timeout=15)
-            if stderr_data:
-                ffmpeg_error = stderr_data.decode("utf-8", errors="ignore").strip()
-        except Exception:
+            except Exception as exc:
+                fail(exc)
+
+        def intermediates(f0, f1, depth):
+            if depth <= 0 or stop.is_set() or self.cancel_requested:
+                return
+            mid = interpolator.interpolate_pair(f0, f1)
+            yield from intermediates(f0, mid, depth - 1)
+            yield mid
+            yield from intermediates(mid, f1, depth - 1)
+
+        threads = []
+        try:
+            self.process = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stderr=stderr_file, bufsize=0)
+            threads = [threading.Thread(target=reader, name='rife-reader'),
+                       threading.Thread(target=writer, name='rife-writer')]
+            for thread in threads:
+                thread.start()
+            previous = get(in_q)
+            if previous is None and not self.cancel_requested:
+                raise RuntimeError('Could not read initial video frame.')
+            frame_idx = 0
+            while previous is not None and not stop.is_set() and not self.cancel_requested:
+                if not put(out_q, previous.tobytes()):
+                    break
+                current = get(in_q)
+                if current is None:
+                    # Hold the final source frame for its full source-frame interval.
+                    for _ in range(multiplier - 1):
+                        if not put(out_q, previous.tobytes()):
+                            break
+                    break
+                for frame in intermediates(previous, current, depth):
+                    if not put(out_q, frame.tobytes()):
+                        break
+                previous = current
+                frame_idx += 1
+                self.progress.emit(min(99, int(frame_idx * 100 / total_frames)),
+                                   f'AI RIFE: {frame_idx}/{total_frames}')
+            put(out_q, None)
+            # Successful completion drains the queue. Failure/cancellation kills
+            # the encoder to interrupt a writer blocked on its input pipe.
+            while threads[1].is_alive():
+                if stop.is_set() or self.cancel_requested:
+                    self._kill_process()
+                threads[1].join(0.1)
+            self.process.wait(timeout=15)
+        except Exception as exc:
+            fail(exc)
+        finally:
+            stop.set()
             self._kill_process()
+            for thread in threads:
+                thread.join()
+            cap.release()
+            if self.process and self.process.stdin:
+                self.process.stdin.close()
+            stderr_file.seek(0)
+            stderr = stderr_file.read().decode('utf-8', errors='replace')
+            stderr_file.close()
 
-        if self.cancel_requested:
-            if os.path.exists(self.output_path):
-                try:
-                    os.remove(self.output_path)
-                except OSError:
-                    pass
-            self.finished.emit(False, True, self.output_path, "Cancelled by user.")
-            return
-
-        success = (
-            self.process is not None
-            and self.process.returncode == 0
-            and os.path.isfile(self.output_path)
-            and os.path.getsize(self.output_path) > 0
-        )
-
-        if success:
-            self.progress.emit(100, "AI Interpolation complete!")
-        self.finished.emit(success, False, self.output_path, ffmpeg_error)
+        success = (not errors and not self.cancel_requested and self.process is not None
+                   and self.process.returncode == 0 and os.path.isfile(self.output_path)
+                   and os.path.getsize(self.output_path) > 0)
+        if not success and os.path.isfile(self.output_path):
+            remove_file(self.output_path)
+        self.finished.emit(success, self.cancel_requested, self.output_path,
+                           '; '.join(errors) or stderr)
 
     def _kill_process(self):
-        """Safely terminate or kill running FFmpeg subprocess."""
-        if self.process is not None and self.process.poll() is None:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=2)
-            except Exception:
-                try:
-                    self.process.kill()
-                    self.process.wait()
-                except Exception:
-                    pass
+        from ..media.process import stop_process
+        stop_process(self.process)
