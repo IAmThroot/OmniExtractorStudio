@@ -106,8 +106,13 @@ jobs:
               assert ref == 'refs/tags/v' + version, (ref, version)
 
       - name: Install Dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg libgl1 libegl1 libglx-mesa0 libpulse0 libxkbcommon-x11-0 libxcb-cursor0
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update $APT_OPTS
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y --no-install-recommends $APT_OPTS ffmpeg libgl1 libegl1 libglx-mesa0 libpulse0 libxkbcommon-x11-0 libxcb-cursor0
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller pytest
