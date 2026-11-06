@@ -1,3 +1,4 @@
+from ..utils.external_process import popen_external
 from ..media.process import remove_file
 import os
 import subprocess
@@ -11,7 +12,7 @@ def extract(owner, cmd, duration, path, progress):
     owner.process = None
     success = False
     try:
-        owner.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        owner.process = popen_external(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         errors = []
         for line in progress_lines(owner, owner.process):
             if line.startswith('out_time_ms='):

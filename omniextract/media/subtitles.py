@@ -1,3 +1,4 @@
+from ..utils.external_process import run_external
 import json
 import os
 import re
@@ -140,7 +141,7 @@ def extract_subtitles_to_temp(source_video, sub_index):
         "-c:s", "srt", temp_srt
     ]
     try:
-        subprocess.run(cmd, capture_output=True, timeout=60)
+        run_external(cmd, capture_output=True, timeout=60)
         if os.path.isfile(temp_srt) and os.path.getsize(temp_srt) > 0:
             return temp_srt
     except Exception:

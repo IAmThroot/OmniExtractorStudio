@@ -1,3 +1,4 @@
+from ..utils.external_process import run_external
 import functools
 import re
 import shutil
@@ -21,7 +22,7 @@ def probe_decode_capabilities() -> List[str]:
         return []
 
     try:
-        result = subprocess.run(
+        result = run_external(
             [ffmpeg_path, '-hwaccels'],
             capture_output=True,
             text=True,
@@ -52,7 +53,7 @@ def probe_encode_capabilities() -> List[str]:
         return []
 
     try:
-        result = subprocess.run(
+        result = run_external(
             [ffmpeg_path, '-encoders'],
             capture_output=True,
             text=True,

@@ -1,3 +1,4 @@
+from ..utils.external_process import popen_external
 """Cancellable subprocess helpers; never leave a PIPE undrained."""
 import logging
 import os
@@ -43,7 +44,7 @@ def stop_process(process):
 
 
 def run_cancellable(owner, cmd, timeout=120):
-    owner.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    owner.process = popen_external(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + timeout
     try:
         while True:

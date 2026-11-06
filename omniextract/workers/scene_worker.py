@@ -1,3 +1,4 @@
+from ..utils.external_process import popen_external
 from ..media.process import remove_file
 import os
 from ..media.process import progress_lines, run_cancellable
@@ -55,7 +56,7 @@ class SceneDetectionWorker(ManagedWorker):
         ]
 
         try:
-            self.process = subprocess.Popen(
+            self.process = popen_external(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,

@@ -1,3 +1,4 @@
+from ..utils.external_process import run_external
 import json
 import os
 import shutil
@@ -16,13 +17,15 @@ def format_file_size(size):
         value /= 1024
 
 
-def probe_video_metadata(video_path, owner=None):
+def probe_video_metadata(video_path, owner=None, strict=False):
     """Probe video properties using ffprobe (avoids OpenCV hanging on MKVs) and return metadata dictionary."""
     if not video_path or not os.path.isfile(video_path):
         return {}
 
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
+        if strict:
+            raise RuntimeError("FFprobe was not found. Install FFmpeg and ensure ffprobe is on PATH.")
         return {}
     
     try:
@@ -31,13 +34,12 @@ def probe_video_metadata(video_path, owner=None):
             "-select_streams", "v:0", "-of", "json", video_path
         ]
         if owner is None:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            res = run_external(cmd, capture_output=True, text=True, timeout=10)
         else:
             from .process import run_cancellable
             res = run_cancellable(owner, cmd, timeout=10)
         if res.returncode != 0:
-            print(f"ffprobe failed for {video_path}: {res.stderr}", file=sys.stderr)
-            return {}
+            raise RuntimeError(f"FFprobe failed: {res.stderr.strip() or res.returncode}")
         data = json.loads(res.stdout)
             
         streams = data.get("streams", [])
@@ -97,7 +99,8 @@ def probe_video_metadata(video_path, owner=None):
             file_size = "Unknown"
 
     except Exception as e:
-        print(f"probe_video_metadata error: {e}", file=sys.stderr)
+        if strict:
+            raise RuntimeError(f"Could not inspect video: {e}") from e
         return {}
 
     return {
@@ -126,7 +129,7 @@ def probe_video_chapters(source_file):
         cmd = [
             ffprobe, "-v", "error", "-show_chapters", "-of", "json", source_file
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        res = run_external(cmd, capture_output=True, text=True, timeout=10)
         if res.returncode == 0:
             data = json.loads(res.stdout)
             raw_chapters = data.get("chapters", [])

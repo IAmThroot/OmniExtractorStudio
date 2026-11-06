@@ -1,3 +1,4 @@
+from ..utils.external_process import run_external
 from ..media.process import run_cancellable
 import json
 import os
@@ -35,7 +36,7 @@ def probe_subtitle_tracks_for_video(video_path, external_subtitle_file="", owner
     ffprobe = shutil.which("ffprobe")
     if ffprobe and video_path and os.path.isfile(video_path):
         try:
-            runner = subprocess.run if owner is None else lambda cmd, **kw: run_cancellable(owner, cmd, timeout=10)
+            runner = run_external if owner is None else lambda cmd, **kw: run_cancellable(owner, cmd, timeout=10)
             result = runner(
                 [ffprobe, "-v", "error", "-select_streams", "s",
                  "-show_entries", "stream=index,codec_name:stream_tags=language,title",
@@ -92,7 +93,7 @@ class MetadataProbeWorker(QThread):
             return
 
         try:
-            metadata = probe_video_metadata(self.video_path, owner=self)
+            metadata = probe_video_metadata(self.video_path, owner=self, strict=True)
             if not metadata:
                 self.error.emit(self.video_path, "Could not open video metadata.")
                 return

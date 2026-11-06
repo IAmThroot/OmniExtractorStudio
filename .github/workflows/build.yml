@@ -58,8 +58,11 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          import subprocess
-          subprocess.run(['dist/OmniExtract/OmniExtract.exe', '--smoke-test'], check=True, timeout=60)
+          import os, subprocess, tempfile
+          with tempfile.TemporaryDirectory() as directory:
+              video = os.path.join(directory, 'video.mp4')
+              subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=64x64:rate=10:duration=1', '-c:v', 'mpeg4', video], check=True)
+              subprocess.run(['dist/OmniExtract/OmniExtract.exe', '--smoke-test-video', video], check=True, timeout=60)
 
       - name: Compress Windows Build
         shell: pwsh

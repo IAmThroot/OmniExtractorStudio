@@ -65,7 +65,31 @@ def main():
     ex.layout().insertLayout(0, toolbar)
 
     ex.show()
-    if "--smoke-test" in sys.argv:
+    if "--smoke-test-video" in sys.argv:
+        import tempfile
+        import cv2
+        from .utils.external_process import run_external
+        errors = []
+        ex._message = lambda kind, title, text: errors.append(text)
+        index = sys.argv.index('--smoke-test-video')
+        video = sys.argv[index + 1]
+        ex.load_video_path(video, async_probe=False)
+        if not ex.current_metadata:
+            raise RuntimeError('Packaged video loading failed: ' + '; '.join(errors))
+        capture = cv2.VideoCapture(video)
+        try:
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                raise RuntimeError('Packaged OpenCV could not decode the video')
+        finally:
+            capture.release()
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, 'frame.png')
+            run_external(['ffmpeg', '-v', 'error', '-y', '-i', video, '-frames:v', '1', output],
+                         check=True, capture_output=True, timeout=30)
+            if not os.path.isfile(output):
+                raise RuntimeError('Packaged FFmpeg frame export failed')
+    if "--smoke-test" in sys.argv or "--smoke-test-video" in sys.argv:
         QTimer.singleShot(0, ex.close)
     sys.exit(app.exec())
 

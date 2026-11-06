@@ -1,3 +1,4 @@
+from ..utils.external_process import popen_external
 """
 Hierarchical audio waveform extraction for OmniExtract Studio.
 """
@@ -82,7 +83,7 @@ def _decode_audio_samples(video_path: str, sample_rate: int = 8000) -> Optional[
     ]
 
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = popen_external(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, _ = process.communicate(timeout=120)
     except Exception:
         if 'process' in locals():

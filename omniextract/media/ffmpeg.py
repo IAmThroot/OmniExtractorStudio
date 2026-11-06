@@ -1,3 +1,4 @@
+from ..utils.external_process import run_external
 import shutil
 import subprocess
 
@@ -18,7 +19,7 @@ def get_ffmpeg_version():
     if not ffmpeg:
         return "Not found"
     try:
-        res = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=5)
+        res = run_external([ffmpeg, "-version"], capture_output=True, text=True, timeout=5)
         if res.returncode == 0:
             first_line = res.stdout.splitlines()[0]
             return first_line

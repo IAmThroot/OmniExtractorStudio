@@ -1,3 +1,4 @@
+from ..utils.external_process import popen_external
 """
 Scene cut detection engine for OmniExtract Studio.
 """
@@ -33,7 +34,7 @@ def detect_scenes_ffmpeg(video_path: str, threshold: float = 0.4) -> List[SceneC
     ]
 
     try:
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = popen_external(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         stdout, stderr = process.communicate(timeout=300)
     except Exception:
         if 'process' in locals():

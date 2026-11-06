@@ -1,3 +1,4 @@
+from ..utils.external_process import popen_external
 from ..media.process import remove_file
 from .base import ManagedWorker, ResultFormat
 import os
@@ -316,7 +317,7 @@ class InterpolationWorker(ManagedWorker):
 
         threads = []
         try:
-            self.process = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stderr=stderr_file, bufsize=0)
+            self.process = popen_external(enc_cmd, stdin=subprocess.PIPE, stderr=stderr_file, bufsize=0)
             threads = [threading.Thread(target=reader, name='rife-reader'),
                        threading.Thread(target=writer, name='rife-writer')]
             for thread in threads:

@@ -1,3 +1,4 @@
+from ..utils.external_process import run_external, popen_external
 import os
 import time
 
@@ -175,7 +176,7 @@ class ThumbnailWorker(QThread):
                     out_path
                 ]
                 try:
-                    self.current_proc = subprocess.Popen(
+                    self.current_proc = popen_external(
                         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
                     )
                     _, stderr = self.current_proc.communicate(timeout=4.0)
@@ -556,7 +557,7 @@ class VideoPreviewDialog(QDialog):
                 ffmpeg, "-y", "-v", "error", "-ss", str(timestamp_sec),
                 "-i", self.video_path, "-vframes", "1", path
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            res = run_external(cmd, capture_output=True, text=True, timeout=15)
             if res.returncode == 0 and os.path.isfile(path):
                 QMessageBox.information(self, "Frame Saved", f"Frame saved successfully.\n\n{path}")
             else:

@@ -1,3 +1,4 @@
+from ..utils.external_process import run_external
 import copy
 from functools import wraps
 import gc
@@ -1465,7 +1466,7 @@ class OmniExtractStudio(QWidget):
         self.preview_button.setEnabled(False)
         self.info_button.setEnabled(False)
         self._message("warning", "Unable to Open Video",
-            "The selected file could not be opened as a video."
+            "The selected file could not be opened as a video.\n\n" + err_msg
         )
 
     def _on_metadata_probed(self, video_path, metadata, subtitle_tracks, external_sub):
@@ -2068,7 +2069,7 @@ class OmniExtractStudio(QWidget):
         clip_name = f"clip_{format_timestamp(start_ms, '-')}_to_{format_timestamp(end_ms, '-')}.{ext}"
         clip_path = self.unique_path(self.save_dir, clip_name, set())
 
-        probe = subprocess.run(
+        probe = run_external(
             [ffprobe, "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=index,codec_name,sample_rate,channels",
              "-of", "default=noprint_wrappers=1", self.source_file],
@@ -2164,7 +2165,7 @@ class OmniExtractStudio(QWidget):
                     "-map", f"0:s:{si}", "-c:s", "srt", srt_path
                 ]
                 try:
-                    subprocess.run(srt_cmd, capture_output=True, timeout=60)
+                    run_external(srt_cmd, capture_output=True, timeout=60)
                 except (subprocess.TimeoutExpired, Exception):
                     pass
 
@@ -2215,7 +2216,7 @@ class OmniExtractStudio(QWidget):
 
         # Verify the FINAL FILE. This is deliberately strict: if the source
         # had audio, a video-only output is considered a failed extraction.
-        verify = subprocess.run(
+        verify = run_external(
             [ffprobe, "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=codec_name,profile,sample_rate,channels",
              "-of", "default=noprint_wrappers=1", clip_path],
@@ -2334,7 +2335,7 @@ class OmniExtractStudio(QWidget):
             self._message("critical", "FFmpeg Not Found", "FFmpeg is required for segment cutting.")
             return
 
-        probe = subprocess.run(
+        probe = run_external(
             [ffprobe, "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=index,codec_name",
              "-of", "default=noprint_wrappers=1", self.source_file],

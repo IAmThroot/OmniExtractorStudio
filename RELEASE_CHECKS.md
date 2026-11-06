@@ -15,3 +15,11 @@ Checked on 2026-10-31 on Linux with Python 3.14.8.
 Windows tests, executable packaging, and startup checks run in the release workflow; they cannot be exercised on this Linux host. Real GPU/model inference and interactive playback remain manual checks.
 
 CI rejects a release tag that differs from the package version. Canonical downloads retain the existing `OmniExtract-Windows.zip` and `OmniExtract-x86_64.AppImage` names and SHA-256 files.
+
+## Linux packaged video loading follow-up — 2026-11-07
+
+- Python 3.14.9: 116 tests passed, 1 existing detector test skipped.
+- Reproduced a system FFprobe failure with an incompatible `libz.so.1` on the frozen library path. The same tool succeeds with the isolated child environment; the parent environment stays unchanged.
+- Source execution, the rebuilt PyInstaller executable, and `AppRun` extracted from the rebuilt AppImage all pass `--smoke-test-video` against a generated MP4. This checks UI metadata loading, OpenCV decoding, and FFmpeg image export.
+- The AppImage's `--appimage-extract-and-run` invocation timed out on this host; explicit extraction and running its `AppRun` succeeded. CI verifies the actual extracted AppImage contents rather than relying on that runtime mode.
+- The Windows packaged media check is configured in CI and was not run on this Linux host. Interactive playback remains a manual check.
