@@ -21,13 +21,29 @@ def test_frozen_restores_system_library_path(monkeypatch,original,expected):
     assert child['PATH']==env['PATH']
 
 
-def test_appimage_original_also_excludes_bundle(monkeypatch):
+def test_appimage_original_also_excludes_bundle(monkeypatch, tmp_path):
+    # Mocking sys.platform does not replace the host's os.path/os.pathsep.
+    # Use native paths so this filtering test also runs on Windows CI.
+    bundle = tmp_path / 'bundle'
+    internal = bundle / 'usr' / 'bin' / '_internal'
+    system = tmp_path / 'system-libs'
+    sibling = tmp_path / 'bundle-other' / 'lib'
     monkeypatch.setattr(sys,'frozen',True,raising=False)
     monkeypatch.setattr(sys,'platform','linux')
-    monkeypatch.setattr(sys,'_MEIPASS','/bundle/usr/bin/_internal',raising=False)
-    env={'APPDIR':'/bundle','LD_LIBRARY_PATH':'/bundle/usr/bin/_internal',
-         'LD_LIBRARY_PATH_ORIG':'/bundle/usr/lib:/opt/libs:/bundle-other/lib'}
-    assert external_environment(env)['LD_LIBRARY_PATH']=='/opt/libs:/bundle-other/lib'
+    monkeypatch.setattr(sys,'_MEIPASS',str(internal),raising=False)
+    env={'APPDIR':str(bundle),'LD_LIBRARY_PATH':str(internal),
+         'LD_LIBRARY_PATH_ORIG':os.pathsep.join(map(str, [bundle / 'usr' / 'lib', internal, system, sibling]))}
+    before = env.copy()
+    assert external_environment(env)['LD_LIBRARY_PATH']==os.pathsep.join(map(str, [system, sibling]))
+    assert env == before
+
+
+def test_frozen_windows_environment_preserved(monkeypatch):
+    monkeypatch.setattr(sys,'frozen',True,raising=False)
+    monkeypatch.setattr(sys,'platform','win32')
+    env={'PATH':r'C:\Windows\System32;C:\FFmpeg\bin',
+         'LD_LIBRARY_PATH':'/bundle','LD_LIBRARY_PATH_ORIG':'/system'}
+    assert external_environment(env)==env
 
 
 def test_source_environment_preserved(monkeypatch):
