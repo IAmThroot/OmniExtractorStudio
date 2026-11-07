@@ -47,10 +47,14 @@ ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir OmniExtract-x86_64.
 
 SMOKE_IMAGE="$PWD/OmniExtract-x86_64.AppImage"
 (cd "$SMOKE_DIR" && "$SMOKE_IMAGE" --appimage-extract > /dev/null)
+"$BUILD_PYTHON" scripts/check_packaging.py "$SMOKE_DIR/squashfs-root/usr/bin"
 APPDIR="$SMOKE_DIR/squashfs-root" QT_QPA_PLATFORM=offscreen timeout 60 "$SMOKE_DIR/squashfs-root/AppRun" --smoke-test-video "$SMOKE_DIR/video.mp4"
 
 if command -v xvfb-run >/dev/null 2>&1; then
-    APPDIR="$SMOKE_DIR/squashfs-root" QT_QPA_PLATFORM=xcb xvfb-run -a timeout 60 "$SMOKE_DIR/squashfs-root/AppRun" --smoke-test-video "$SMOKE_DIR/video.mp4"
+    if ! APPDIR="$SMOKE_DIR/squashfs-root" QT_QPA_PLATFORM=xcb QT_DEBUG_PLUGINS=1 xvfb-run -a timeout 60 "$SMOKE_DIR/squashfs-root/AppRun" --smoke-test-video "$SMOKE_DIR/video.mp4" >"$SMOKE_DIR/xcb.log" 2>&1; then
+        cat "$SMOKE_DIR/xcb.log"
+        exit 1
+    fi
 fi
 
 echo "==> AppImage created successfully: OmniExtract-x86_64.AppImage"

@@ -58,3 +58,10 @@ CI rejects a release tag that differs from the package version. Canonical downlo
 - Final source validation with bytecode and pytest cache writes disabled: 151 passed, 1 existing detector test skipped. This includes success-only 100% progress updates.
 - Shell syntax and diff whitespace checks pass. Workflow YAML parses; Linux Actions installs xvfb/xauth to run the packaged X11 conversion check, preserving the existing apt retry/timeout optimizations.
 - The source is ready for manual commit and push to main. GitHub Actions will rebuild the artifacts; no new commit or push was made during cleanup.
+
+## Linux Actions XCB dependency follow-up — 2026-11-07
+
+- The failed X11 smoke test reported that the XCB platform plugin could not initialize. The cursor package was already installed; the minimal runner package list omitted additional Qt X11 runtime helpers, including ICCCM and keysyms. The supplied log did not identify an individual missing shared library.
+- Added explicit X11/XCB runtime packages to the existing apt command while preserving noninteractive settings, retries, timeouts, and --no-install-recommends.
+- Linux packaging now runs ldd on libqxcb.so using the bundled Qt library paths, both before packaging and after extraction. Missing libraries and version errors fail with the loader output. Failed X11 checks print QT_DEBUG_PLUGINS diagnostics.
+- Local verification: 156 tests passed, 1 existing detector test skipped; the installed Qt XCB plugin passes the real loader check. Workflow YAML and shell syntax checks pass. The updated GitHub runner still requires a workflow rerun.

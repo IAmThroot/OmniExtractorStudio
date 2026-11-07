@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 ### Fixed
+- Install explicit XCB utility dependencies for Linux Actions and diagnose missing or incompatible platform-plugin libraries before X11 startup.
 - Conversion and interpolation progress bars reach 100% after successful completion instead of remaining at the in-progress 99% cap.
 - Guarded job actions consume Qt’s clicked(bool) argument instead of forwarding it to no-argument methods, fixing the Convert-button TypeError/abort. Regression and packaged checks now click the button.
 - Frozen Linux builds use Qt file dialogs instead of host KIO-backed dialogs, avoiding missing file-protocol workers.
