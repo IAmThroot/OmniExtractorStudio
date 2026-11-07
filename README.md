@@ -84,6 +84,18 @@ cd OmniExtractorStudio
 pip install -r requirements.txt
 ```
 
+When updating an existing pip environment, remove all OpenCV wheel variants first,
+then reinstall requirements so that only `opencv-python-headless` provides `cv2`:
+
+```bash
+python -m pip uninstall opencv-python opencv-contrib-python opencv-python-headless opencv-contrib-python-headless
+python -m pip install -r requirements.txt
+```
+
+PyQt6 supplies the application windows. The headless OpenCV package retains video
+and image processing while avoiding a second Qt runtime in packaged builds.
+
+
 > **💡 NVIDIA GPU Acceleration (Recommended for AI Interpolation & Detection):**
 > - **pip / Virtualenv**: `pip install onnxruntime-gpu` (replaces standard CPU `onnxruntime`)
 > - **Arch Linux / CachyOS**: `sudo pacman -S python-onnxruntime-opt-cuda` (or `python-onnxruntime-cuda`)

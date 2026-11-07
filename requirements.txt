@@ -1,5 +1,6 @@
 PyQt6>=6.5.0
-opencv-python>=4.7.0
+# PyQt6 supplies the GUI; the regular OpenCV wheel bundles conflicting Qt 5 libraries.
+opencv-python-headless>=4.7.0
 numpy>=1.24.0
 
 # AI Inference Backend

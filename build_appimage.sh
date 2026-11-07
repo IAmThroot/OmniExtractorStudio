@@ -1,28 +1,37 @@
 #!/bin/bash
 set -e
+# Packaging and automated checks must not open desktop-integration dialogs.
+export APPIMAGELAUNCHER_DISABLE=1
 
 echo "==> Building with PyInstaller..."
-PYI_BIN="pyinstaller"
+BUILD_PYTHON="python"
 if command -v .build_env/bin/pyinstaller >/dev/null 2>&1; then
-    PYI_BIN=".build_env/bin/pyinstaller"
+    BUILD_PYTHON=".build_env/bin/python"
 fi
 
-$PYI_BIN --noconfirm --onedir --windowed --name "OmniExtract" \
+"$BUILD_PYTHON" scripts/check_packaging.py
+
+"$BUILD_PYTHON" -m PyInstaller --clean --noconfirm --onedir --windowed --name "OmniExtract" \
     --add-data "OmniExtract.png:." \
     --add-data "OmniExtract.ico:." \
     --add-data "assets:assets" \
     extractor.py
 
+"$BUILD_PYTHON" scripts/check_packaging.py dist/OmniExtract
+
 echo "==> Checking packaged application startup..."
 SMOKE_DIR=$(mktemp -d)
 trap 'rm -rf "$SMOKE_DIR"' EXIT
-ffmpeg -v error -f lavfi -i testsrc2=size=64x64:rate=10:duration=1 -c:v mpeg4 "$SMOKE_DIR/video.mp4"
+ffmpeg -v error -f lavfi -i testsrc2=size=64x64:rate=30:duration=1 -c:v mpeg4 "$SMOKE_DIR/video.mp4"
 QT_QPA_PLATFORM=offscreen timeout 60 dist/OmniExtract/OmniExtract --smoke-test-video "$SMOKE_DIR/video.mp4"
 
-if [ ! -f "appimagetool" ]; then
+if [ ! -s "appimagetool" ]; then
     echo "==> Downloading appimagetool..."
-    wget -q -O appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-    chmod +x appimagetool
+    curl --fail --location --connect-timeout 20 --max-time 120 --retry 2 \
+        --output appimagetool.download \
+        "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+    chmod +x appimagetool.download
+    mv appimagetool.download appimagetool
 fi
 
 echo "==> Creating AppDir..."
@@ -39,5 +48,9 @@ ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir OmniExtract-x86_64.
 SMOKE_IMAGE="$PWD/OmniExtract-x86_64.AppImage"
 (cd "$SMOKE_DIR" && "$SMOKE_IMAGE" --appimage-extract > /dev/null)
 APPDIR="$SMOKE_DIR/squashfs-root" QT_QPA_PLATFORM=offscreen timeout 60 "$SMOKE_DIR/squashfs-root/AppRun" --smoke-test-video "$SMOKE_DIR/video.mp4"
+
+if command -v xvfb-run >/dev/null 2>&1; then
+    APPDIR="$SMOKE_DIR/squashfs-root" QT_QPA_PLATFORM=xcb xvfb-run -a timeout 60 "$SMOKE_DIR/squashfs-root/AppRun" --smoke-test-video "$SMOKE_DIR/video.mp4"
+fi
 
 echo "==> AppImage created successfully: OmniExtract-x86_64.AppImage"

@@ -2778,6 +2778,7 @@ class OmniExtractStudio(QWidget):
             if not getattr(self, "in_batch_mode", False):
                 self._message("information", "Cancelled", "Framerate conversion process was cancelled.")
         elif success:
+            self.conv_progress_bar.setValue(100)
             self.conv_progress_label.setText(f"Finished: {os.path.basename(path)}")
             if not getattr(self, "in_batch_mode", False):
                 self._message("information", "Complete",
@@ -2930,6 +2931,7 @@ class OmniExtractStudio(QWidget):
             if not getattr(self, "in_batch_mode", False):
                 self._message("information", "Cancelled", "Interpolation process was cancelled.")
         elif success:
+            self.interp_progress_bar.setValue(100)
             self.interp_progress_label.setText(f"Finished: {os.path.basename(path)}")
             if not getattr(self, "in_batch_mode", False):
                 self._message("information", "Complete",
@@ -3551,14 +3553,16 @@ class OmniExtractStudio(QWidget):
 
 def _guard_job(method):
     @wraps(method)
-    def guarded(self, *args, **kwargs):
+    def guarded(self, _checked=False):
+        # QPushButton.clicked supplies a bool. These guarded actions take no
+        # arguments; forwarding it raises TypeError inside the Qt slot.
         if self._closing or self._active_worker is not None or (self.in_batch_mode and not self._dispatching_batch):
             return
         if method.__name__ != 'processBatch' and not self.current_metadata:
             self._message('warning', 'Source Unavailable', 'Load a video and wait for metadata before processing.')
             return
         try:
-            return method(self, *args, **kwargs)
+            return method(self)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             self.set_extracting_state(False)
             self._refresh_job_controls()

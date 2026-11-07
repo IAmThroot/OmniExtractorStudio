@@ -2,4 +2,7 @@
 HERE="$(dirname "$(readlink -f "${0}")")"
 export PATH="${HERE}/usr/bin:${PATH}"
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+# Host desktop styles can require resources/ABIs absent from a self-contained
+# image. Fusion is built into the bundled Qt Widgets runtime.
+export QT_STYLE_OVERRIDE=Fusion
 exec "${HERE}/usr/bin/OmniExtract" "$@"

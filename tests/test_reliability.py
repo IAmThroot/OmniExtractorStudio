@@ -420,3 +420,38 @@ def test_source_startup_check(tmp_path):
         env=dict(os.environ,QT_QPA_PLATFORM='offscreen',XDG_CONFIG_HOME=str(tmp_path)),
         capture_output=True,text=True,timeout=20)
     assert result.returncode==0, result.stderr
+
+
+def test_ui_30_to_24_conversion_repeated(window,app,tmp_path,monkeypatch):
+    if not shutil.which('ffmpeg'):
+        pytest.skip('FFmpeg unavailable')
+    source=tmp_path/'source30.mp4'
+    subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i',
+                    'testsrc2=size=64x64:rate=30:duration=1','-c:v','libx264',str(source)],check=True)
+    window.load_video_path(str(source),async_probe=False)
+    window.conv_fps_preset_combo.setCurrentText('Custom')
+    window.conv_fps_spin.setValue(24)
+    for i in range(3):
+        output=tmp_path/f'converted{i}.mp4'
+        monkeypatch.setattr('omniextract.ui.main_window.QFileDialog.getSaveFileName',lambda *a,**k:(str(output),''))
+        window.conv_start_btn.click()
+        worker=window._active_worker
+        assert worker is not None
+        wait_until(app,lambda:window._active_worker is None)
+        assert worker.outcome.status==JobStatus.SUCCESS,worker.outcome.error
+        assert window.conv_start_btn.isEnabled()
+        assert window.conv_progress_bar.value()==100
+        data=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(output)]))
+        stream=next(s for s in data['streams'] if s['codec_type']=='video')
+        assert stream['avg_frame_rate']=='24/1'
+        assert int(stream['nb_frames'])==24
+
+
+@pytest.mark.parametrize('kind', ['conv','interpolation'])
+@pytest.mark.parametrize('success,cancelled', [(True,False),(False,False),(False,True)])
+def test_progress_reaches_100_only_on_success(window,kind,success,cancelled):
+    bar=window.conv_progress_bar if kind=='conv' else window.interp_progress_bar
+    callback=window._on_conv_finished if kind=='conv' else window._on_interpolation_finished
+    bar.setValue(99)
+    callback(success,cancelled,'output.mp4','encoder error' if not success else '')
+    assert bar.value()==(100 if success and not cancelled else 99)

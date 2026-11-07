@@ -40,6 +40,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller pytest
+          python scripts/check_packaging.py
 
       - name: Install FFmpeg
         uses: FedericoCarboni/setup-ffmpeg@v3
@@ -51,7 +52,10 @@ jobs:
 
       - name: Build Executable
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "OmniExtract" --icon "OmniExtract.ico" --add-data "OmniExtract.png;." --add-data "OmniExtract.ico;." --add-data "assets;assets" extractor.py
+          pyinstaller --clean --noconfirm --onedir --windowed --name "OmniExtract" --icon "OmniExtract.ico" --add-data "OmniExtract.png;." --add-data "OmniExtract.ico;." --add-data "assets;assets" extractor.py
+
+      - name: Check Bundled Libraries
+        run: python scripts/check_packaging.py dist/OmniExtract
 
       - name: Smoke Test Packaged Application
         shell: python
@@ -61,7 +65,7 @@ jobs:
           import os, subprocess, tempfile
           with tempfile.TemporaryDirectory() as directory:
               video = os.path.join(directory, 'video.mp4')
-              subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=64x64:rate=10:duration=1', '-c:v', 'mpeg4', video], check=True)
+              subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=64x64:rate=30:duration=1', '-c:v', 'mpeg4', video], check=True)
               subprocess.run(['dist/OmniExtract/OmniExtract.exe', '--smoke-test-video', video], check=True, timeout=60)
 
       - name: Compress Windows Build
@@ -112,10 +116,11 @@ jobs:
         run: |
           APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
           sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update $APT_OPTS
-          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y --no-install-recommends $APT_OPTS ffmpeg libgl1 libegl1 libglx-mesa0 libpulse0 libxkbcommon-x11-0 libxcb-cursor0
+          sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y --no-install-recommends $APT_OPTS xvfb xauth ffmpeg libgl1 libegl1 libglx-mesa0 libpulse0 libxkbcommon-x11-0 libxcb-cursor0
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller pytest
+          python scripts/check_packaging.py
 
       - name: Run Tests
         env:

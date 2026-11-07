@@ -38,6 +38,10 @@ omni_shifted_*.srt
 # AppImage build artifacts
 AppDir/
 *.AppImage
+*.AppImage.sha256
+/appimagetool
+/appimagetool.download
+/OmniExtract.spec
 
 # Test and lint caches
 .pytest_cache/
