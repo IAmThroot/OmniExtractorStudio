@@ -5,17 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
 
-### Fixed
-- Install explicit XCB utility dependencies for Linux Actions and diagnose missing or incompatible platform-plugin libraries before X11 startup.
-- Conversion and interpolation progress bars reach 100% after successful completion instead of remaining at the in-progress 99% cap.
-- Guarded job actions consume Qt’s clicked(bool) argument instead of forwarding it to no-argument methods, fixing the Convert-button TypeError/abort. Regression and packaged checks now click the button.
-- Frozen Linux builds use Qt file dialogs instead of host KIO-backed dialogs, avoiding missing file-protocol workers.
-- AppImages select Qt’s built-in Fusion style to avoid host desktop-style plugin crashes after extraction.
-- Use headless OpenCV to avoid bundling Qt 5 alongside PyQt6; packaging checks reject GUI-enabled OpenCV and conflicting Qt libraries, and Linux CI tests X11 startup.
-- Linux executables isolate system FFmpeg/FFprobe from bundled library search paths, including AppImage launcher paths.
-- Video-opening errors retain FFprobe diagnostics; release checks now load, decode, and export a generated video from the packaged app.
 
 ## [1.4.0] - 2026-10-31
 
@@ -29,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Independent queued settings and subtitle identities; batches continue after failures and summarize outcomes.
 - Pitch-preserving audio retiming for conform playback, including extreme speed ratios.
 - Legacy preset defaults, built-in motion presets, and supported RIFE ONNX descriptions.
+- Install explicit XCB utility dependencies for Linux Actions and diagnose missing or incompatible platform-plugin libraries before X11 startup.
+- Conversion and interpolation progress bars reach 100% after successful completion instead of remaining at the in-progress 99% cap.
+- Guarded job actions consume Qt’s clicked(bool) argument instead of forwarding it to no-argument methods, fixing the Convert-button TypeError/abort. Regression and packaged checks now click the button.
+- Frozen Linux builds use Qt file dialogs instead of host KIO-backed dialogs, avoiding missing file-protocol workers.
+- AppImages select Qt’s built-in Fusion style to avoid host desktop-style plugin crashes after extraction.
+- Use headless OpenCV to avoid bundling Qt 5 alongside PyQt6; packaging checks reject GUI-enabled OpenCV and conflicting Qt libraries, and Linux CI tests X11 startup.
+- Linux executables isolate system FFmpeg/FFprobe from bundled library search paths, including AppImage launcher paths.
+- Video-opening errors retain FFprobe diagnostics; release checks now load, decode, and export a generated video from the packaged app.
 
 ### Maintenance
 - Added worker, UI state, and real FFmpeg regression coverage.
